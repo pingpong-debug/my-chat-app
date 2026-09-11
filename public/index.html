@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Chat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Language Selection Header -->
+    <div id="top-bar">
+        <label for="lang-select">Translate incoming messages to:</label>
+        <select id="lang-select">
+		<option value="en">Loading languages...</option>
+		</select>
+    </div>
+
+    <!-- Chat Message Container -->
+    <ul id="messages"></ul>
+
+    <!-- Input Form -->
+    <form id="form">
+        <input id="input" autocomplete="off" placeholder="Type a message in any language..." />
+        <button type="submit">Send</button>
+    </form>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const form = document.getElementById('form');
+        const input = document.getElementById('input');
+        const messages = document.getElementById('messages');
+        const langSelect = document.getElementById('lang-select');
+		// Automatically fetch all 130+ languages and build the dropdown
+fetch('/api/languages')
+    .then(res => res.json())
+    .then(langs => {
+        langSelect.innerHTML = ''; 
+        langs.forEach(lang => {
+            const option = document.createElement('option');
+            option.value = lang.code;
+            option.textContent = lang.name;
+            if (lang.code === 'en') option.selected = true; // Set default language
+            langSelect.appendChild(option);
+        });
+    });
+
+        // Form submission: sends message in whatever language the user types
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            if (input.value.trim()) {
+                socket.emit('chat message', input.value.trim());
+                input.value = '';
+            }
+        });
+
+        // Receive incoming messages and translate according to user's selected language
+        socket.on('chat message', async (data) => {
+            const targetLang = langSelect.value;
+
+            const item = document.createElement('li');
+            item.innerHTML = `<strong>Original:</strong> ${data.text}<br><em>Translating...</em>`;
+            messages.appendChild(item);
+            window.scrollTo(0, document.body.scrollHeight);
+
+            try {
+                const response = await fetch(`/api/translate?text=${encodeURIComponent(data.text)}&target=${targetLang}`);
+                const result = await response.json();
+
+                if (result.translatedText) {
+                    item.innerHTML = `
+                        <strong>Original (${result.fromLang}):</strong> ${data.text}<br>
+                        <strong>Translated (${targetLang}):</strong> ${result.translatedText}
+                    `;
+                } else {
+                    item.innerHTML = `${data.text}`;
+                }
+            } catch (err) {
+                item.innerHTML = `${data.text}`;
+            }
+
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+    </script>
+</body>
+</html>
