@@ -68,6 +68,7 @@
         const identityName = document.getElementById('identity-name');
 
         let username = localStorage.getItem('chatUsername') || '';
+        let hasJoined = false;
         if (username) joinInput.value = username;
 
         function addSystemNote(text) {
@@ -84,6 +85,7 @@
             username = (name || '').trim().slice(0, 24) || 'Anonymous';
             localStorage.setItem('chatUsername', username);
             identityName.textContent = username;
+            hasJoined = true;
             socket.emit('join', username);
 
             if (!hasSeenIntro) {
@@ -103,9 +105,10 @@
             if (e.key === 'Enter') enterChat(joinInput.value);
         });
 
-        // Re-announce identity if the server restarts/reconnects
+        // Re-announce identity only if we reconnect after already having joined
+        // (e.g. the server restarted) — never on the initial silent connection.
         socket.on('connect', () => {
-            if (username) socket.emit('join', username);
+            if (hasJoined) socket.emit('join', username);
         });
 
         // --- Identity menu (•••) ---
