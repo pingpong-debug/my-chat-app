@@ -1,4 +1,5 @@
 require('dotenv').config({ quiet: true });
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -116,6 +117,16 @@ async function processCompanionQueue() {
 }
 
 async function handleCompanionRequest(prompt, username, clientId, room) {
+    const replyId = crypto.randomUUID();
+
+    io.to(room).emit('companion message start', {
+        replyId,
+        username: 'Companion',
+        timestamp: Date.now()
+    });
+
+    let fullReply = '';
+
     try {
         // clientId is a permanent per-browser ID (survives reconnects), unlike
         // socket.id, so the AI keeps treating the same person as the same
@@ -130,17 +141,21 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
             chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
         }
 
-        const result = await model.generateContent({ contents: chatHistory });
-        const reply = result.response.text();
+        const streamResult = await model.generateContentStream({ contents: chatHistory });
 
-        chatHistory.push({ role: 'model', parts: [{ text: reply }] });
+        for await (const chunk of streamResult.stream) {
+            const delta = chunk.text();
+            if (!delta) continue;
+            fullReply += delta;
+            io.to(room).emit('companion message chunk', { replyId, delta });
+        }
+
+        chatHistory.push({ role: 'model', parts: [{ text: fullReply }] });
         await saveChatHistory(room, chatHistory);
 
-        io.to(room).emit('chat message', {
-            text: reply,
-            senderId: 'AI_COMPANION',
-            clientId: 'AI_COMPANION',
-            username: 'Companion',
+        io.to(room).emit('companion message end', {
+            replyId,
+            text: fullReply,
             timestamp: Date.now()
         });
     } catch (error) {
@@ -153,11 +168,12 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
             ? "Daily thinking quota exhausted. Recalibrating — available again once the free tier resets tomorrow."
             : "Connection severed. Awaiting recalibration.";
 
-        io.to(room).emit('chat message', {
+        // If nothing streamed yet, the bubble is still empty — send the
+        // failure text as the final content either way.
+        io.to(room).emit('companion message end', {
+            replyId,
             text: failureText,
-            senderId: 'AI_COMPANION',
-            clientId: 'AI_COMPANION',
-            username: 'Companion',
+            error: true,
             timestamp: Date.now()
         });
     }
