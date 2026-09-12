@@ -186,6 +186,14 @@ io.on('connection', (socket) => {
         socket.data.clientId = (rawClientId || socket.id).toString();
 
         const room = (rawRoom || '').toString().trim().toLowerCase().slice(0, 24) || DEFAULT_ROOM;
+
+        // Leave whatever room they were in before, so switching rooms doesn't
+        // leave them silently subscribed to both.
+        const previousRoom = socket.data.room;
+        if (previousRoom && previousRoom !== room) {
+            socket.leave(previousRoom);
+        }
+
         socket.data.room = room;
         socket.join(room);
 
