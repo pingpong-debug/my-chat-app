@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
