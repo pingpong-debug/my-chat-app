@@ -71,6 +71,14 @@
         let hasJoined = false;
         if (username) joinInput.value = username;
 
+        // A permanent ID for this browser, separate from socket.id (which
+        // changes every time the connection drops and reconnects).
+        let clientId = localStorage.getItem('chatClientId');
+        if (!clientId) {
+            clientId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+            localStorage.setItem('chatClientId', clientId);
+        }
+
         function addSystemNote(text) {
             const note = document.createElement('li');
             note.className = 'system-note';
@@ -86,7 +94,7 @@
             localStorage.setItem('chatUsername', username);
             identityName.textContent = username;
             hasJoined = true;
-            socket.emit('join', username);
+            socket.emit('join', { username, clientId });
 
             if (!hasSeenIntro) {
                 hasSeenIntro = true;
@@ -108,7 +116,7 @@
         // Re-announce identity only if we reconnect after already having joined
         // (e.g. the server restarted) — never on the initial silent connection.
         socket.on('connect', () => {
-            if (hasJoined) socket.emit('join', username);
+            if (hasJoined) socket.emit('join', { username, clientId });
         });
 
         // --- Identity menu (•••) ---
@@ -193,7 +201,7 @@
         // Receive incoming messages and translate according to user's selected language
         socket.on('chat message', async (data) => {
             const targetLang = langSelect.value;
-            const isOwn = data.senderId === socket.id;
+            const isOwn = data.clientId === clientId;
             const isAI = data.senderId === 'AI_COMPANION';
             const isSystem = data.senderId === 'SYSTEM';
 
