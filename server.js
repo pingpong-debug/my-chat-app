@@ -5,6 +5,13 @@ const { Server } = require('socket.io');
 const { languages } = require('google-translate-api-x');
 const translate = require('google-translate-api-x');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { Redis } = require('@upstash/redis');
+
+// Persistent store for chat history — survives server restarts/sleep,
+// unlike the old in-memory array. Reads UPSTASH_REDIS_REST_URL and
+// UPSTASH_REDIS_REST_TOKEN from the environment automatically.
+const redis = Redis.fromEnv();
+const CHAT_HISTORY_KEY = 'chat:history';
 
 // Secure and cleaned environment variable initialization for modern credentials
 const CLEAN_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : "";
@@ -42,7 +49,25 @@ app.get('/api/translate', async (req, res) => {
 // --- AI Companion: queue + memory ---
 
 const MAX_HISTORY_MESSAGES = 40; // ~20 back-and-forth exchanges
-let chatHistory = []; // shared memory of the room's conversation with the AI
+
+async function loadChatHistory() {
+    try {
+        const raw = await redis.get(CHAT_HISTORY_KEY);
+        if (!raw) return [];
+        return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (err) {
+        console.error('Redis load error (starting with empty history):', err);
+        return [];
+    }
+}
+
+async function saveChatHistory(history) {
+    try {
+        await redis.set(CHAT_HISTORY_KEY, JSON.stringify(history));
+    } catch (err) {
+        console.error('Redis save error (this reply will not be remembered):', err);
+    }
+}
 
 const companionQueue = [];
 let isProcessingQueue = false;
@@ -71,6 +96,8 @@ async function handleCompanionRequest(prompt, username, clientId) {
         // speaker even if their connection blips mid-conversation.
         const shortId = (clientId || 'anon').replace(/-/g, '').slice(0, 4);
         const taggedPrompt = `${username} (${shortId}): ${prompt}`;
+
+        let chatHistory = await loadChatHistory();
         chatHistory.push({ role: 'user', parts: [{ text: taggedPrompt }] });
 
         if (chatHistory.length > MAX_HISTORY_MESSAGES) {
@@ -81,6 +108,7 @@ async function handleCompanionRequest(prompt, username, clientId) {
         const reply = result.response.text();
 
         chatHistory.push({ role: 'model', parts: [{ text: reply }] });
+        await saveChatHistory(chatHistory);
 
         io.emit('chat message', {
             text: `[SYSTEM_AI]: ${reply}`,
