@@ -141,8 +141,16 @@ async function handleCompanionRequest(prompt, username, clientId) {
         });
     } catch (error) {
         console.error("AI Error:", error);
+
+        const isQuotaError = error?.status === 429
+            || /quota/i.test(error?.message || '');
+
+        const failureText = isQuotaError
+            ? "Daily thinking quota exhausted. Recalibrating — available again once the free tier resets tomorrow."
+            : "Connection severed. Awaiting recalibration.";
+
         io.emit('chat message', {
-            text: `Connection severed. Awaiting recalibration.`,
+            text: failureText,
             senderId: 'AI_COMPANION',
             clientId: 'AI_COMPANION',
             username: 'Companion',
