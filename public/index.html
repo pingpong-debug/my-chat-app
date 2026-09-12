@@ -105,6 +105,51 @@
             window.scrollTo(0, document.body.scrollHeight);
         }
 
+        // --- Procedural sound effects (Web Audio API, no audio files) ---
+        // Kept intentionally short and clean — a few oscillator blips —
+        // to match the minimal, dot-matrix Nothing OS feel rather than
+        // sounding like a generic notification chime.
+        let audioCtx = null;
+        function getAudioCtx() {
+            if (!audioCtx) {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (Ctx) audioCtx = new Ctx();
+            }
+            // Browsers suspend audio contexts until a user gesture; resume
+            // defensively every time we're about to play something.
+            if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+            return audioCtx;
+        }
+
+        function playTone({ freq = 440, duration = 0.08, type = 'sine', gain = 0.05, delay = 0 } = {}) {
+            const ctx = getAudioCtx();
+            if (!ctx) return;
+
+            const osc = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            osc.type = type;
+            osc.frequency.value = freq;
+
+            const startAt = ctx.currentTime + delay;
+            gainNode.gain.setValueAtTime(0, startAt);
+            gainNode.gain.linearRampToValueAtTime(gain, startAt + 0.005);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+
+            osc.connect(gainNode).connect(ctx.destination);
+            osc.start(startAt);
+            osc.stop(startAt + duration + 0.02);
+        }
+
+        const sounds = {
+            send: () => playTone({ freq: 720, duration: 0.05, type: 'square', gain: 0.04 }),
+            receive: () => playTone({ freq: 480, duration: 0.06, type: 'sine', gain: 0.045 }),
+            companion: () => {
+                playTone({ freq: 330, duration: 0.09, type: 'triangle', gain: 0.05 });
+                playTone({ freq: 550, duration: 0.12, type: 'triangle', gain: 0.05, delay: 0.08 });
+            },
+            system: () => playTone({ freq: 260, duration: 0.07, type: 'sine', gain: 0.035 })
+        };
+
         let hasSeenIntro = false;
 
         function enterChat(name, roomCode) {
@@ -194,6 +239,7 @@
         form.addEventListener('submit', (e) => {
             e.preventDefault();
             if (input.value.trim()) {
+                sounds.send();
                 socket.emit('chat message', input.value.trim());
                 input.value = '';
                 socket.emit('stop typing');
@@ -337,6 +383,7 @@
         const streamingMessages = new Map(); // replyId -> { bodyEl, rawText }
 
         socket.on('companion message start', (data) => {
+            sounds.companion();
             const item = document.createElement('li');
             item.className = 'ai';
             item.innerHTML = `
@@ -409,6 +456,7 @@
             }
 
             if (isSystem) {
+                sounds.system();
                 addSystemNote(data.text);
                 return;
             }
@@ -426,6 +474,8 @@
                 window.scrollTo(0, document.body.scrollHeight);
                 return;
             }
+
+            sounds.receive();
 
             item.innerHTML = `
                 <div class="meta"><span class="name">${escapeHtml(data.username || 'Stranger')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
