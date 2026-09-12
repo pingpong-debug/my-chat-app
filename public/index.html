@@ -259,6 +259,80 @@
             return DOMPurify.sanitize(html);
         }
 
+        // Strip Markdown syntax down to plain readable text, for TTS —
+        // hearing "asterisk asterisk bold asterisk asterisk" out loud would
+        // defeat the point.
+        function stripMarkdownForSpeech(str) {
+            return String(str ?? '')
+                .replace(/```[\s\S]*?```/g, ' code block omitted ')
+                .replace(/`([^`]+)`/g, '$1')
+                .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+                .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+                .replace(/[*_#>~]/g, '')
+                .replace(/^\s*-\s+/gm, '')
+                .replace(/\n{2,}/g, '. ')
+                .replace(/\n/g, ' ')
+                .trim();
+        }
+
+        // --- Voice output (manual play button per companion reply) ---
+        let currentUtterance = null;
+
+        function speakText(text, btnEl) {
+            if (!('speechSynthesis' in window)) return;
+
+            // If this exact button is already speaking, stop it (toggle off)
+            if (currentUtterance && btnEl.dataset.speaking === 'true') {
+                window.speechSynthesis.cancel();
+                return;
+            }
+
+            // Cancel any other reply currently being read
+            window.speechSynthesis.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(text));
+            currentUtterance = utterance;
+
+            document.querySelectorAll('.speak-btn[data-speaking="true"]').forEach(el => {
+                el.dataset.speaking = 'false';
+                el.textContent = '🔊';
+            });
+
+            btnEl.dataset.speaking = 'true';
+            btnEl.textContent = '⏹';
+
+            utterance.onend = utterance.onerror = () => {
+                btnEl.dataset.speaking = 'false';
+                btnEl.textContent = '🔊';
+                if (currentUtterance === utterance) currentUtterance = null;
+            };
+
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function addSpeakButton(item, bodyEl, getText) {
+            if (!('speechSynthesis' in window)) return;
+            const metaEl = item.querySelector('.meta');
+            if (!metaEl || metaEl.querySelector('.speak-btn')) return;
+
+            const timeEl = metaEl.querySelector('.time');
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'speak-btn';
+            btn.textContent = '🔊';
+            btn.dataset.speaking = 'false';
+            btn.addEventListener('click', () => speakText(getText(), btn));
+
+            // Put the button right after the timestamp so both sit together
+            // on the right side of the row, instead of getting spread apart
+            // by the row's space-between layout.
+            if (timeEl) {
+                timeEl.insertAdjacentElement('afterend', btn);
+            } else {
+                metaEl.appendChild(btn);
+            }
+        }
+
         // --- Streaming companion replies ---
         const streamingMessages = new Map(); // replyId -> { bodyEl, rawText }
 
@@ -293,6 +367,7 @@
 
             const { bodyEl } = entry;
             const finalText = data.text ?? entry.rawText;
+            const item = bodyEl.closest('li');
 
             if (data.error) {
                 bodyEl.textContent = finalText;
@@ -302,6 +377,7 @@
 
             bodyEl.innerHTML = renderAiText(finalText);
             window.scrollTo(0, document.body.scrollHeight);
+            if (item) addSpeakButton(item, bodyEl, () => finalText);
 
             // Same translate step the regular message flow does, just applied
             // after the fact instead of blocking the initial render.
