@@ -6,6 +6,7 @@ const { languages } = require('google-translate-api-x');
 const translate = require('google-translate-api-x');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { Redis } = require('@upstash/redis');
+const rateLimit = require('express-rate-limit');
 
 // Persistent store for chat history — survives server restarts/sleep,
 // unlike the old in-memory array. Reads UPSTASH_REDIS_REST_URL and
@@ -34,7 +35,19 @@ app.get('/api/languages', (req, res) => {
     res.json(langList);
 });
 
-app.get('/api/translate', async (req, res) => {
+// Each incoming chat message triggers one translation request per connected
+// browser, so a busy room is expected to make plenty of requests — this cap
+// is meant to stop a single source from hammering the endpoint, not to
+// interrupt normal use.
+const translateLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 100, // per IP, per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many translation requests — please slow down.' }
+});
+
+app.get('/api/translate', translateLimiter, async (req, res) => {
     const { text, target } = req.query;
     if (!text || !target) return res.status(400).json({ error: 'Missing data' });
 
