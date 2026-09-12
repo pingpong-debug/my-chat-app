@@ -70,11 +70,26 @@
         let username = localStorage.getItem('chatUsername') || '';
         if (username) joinInput.value = username;
 
+        function addSystemNote(text) {
+            const note = document.createElement('li');
+            note.className = 'system-note';
+            note.textContent = text;
+            messages.appendChild(note);
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        let hasSeenIntro = false;
+
         function enterChat(name) {
             username = (name || '').trim().slice(0, 24) || 'Anonymous';
             localStorage.setItem('chatUsername', username);
             identityName.textContent = username;
             socket.emit('join', username);
+
+            if (!hasSeenIntro) {
+                hasSeenIntro = true;
+                addSystemNote('Welcome to Global Chat. Messages are translated automatically into your selected language — pick one up top. Tag @companion anywhere in a message to talk to the AI assistant.');
+            }
 
             btnText.innerText = "CONNECTING...";
             setTimeout(() => {
@@ -177,10 +192,16 @@
             const targetLang = langSelect.value;
             const isOwn = data.senderId === socket.id;
             const isAI = data.senderId === 'AI_COMPANION';
+            const isSystem = data.senderId === 'SYSTEM';
 
             if (data.senderId) {
                 typingUsers.delete(data.senderId);
                 renderTypingState();
+            }
+
+            if (isSystem) {
+                addSystemNote(data.text);
+                return;
             }
 
             const item = document.createElement('li');
