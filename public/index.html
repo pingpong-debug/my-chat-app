@@ -53,6 +53,8 @@
     </form>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
     <script>
         const socket = io();
         const form = document.getElementById('form');
@@ -198,6 +200,25 @@
             return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
 
+        // Plain user/system text: escape it so nobody can inject HTML into
+        // the page by typing it as a "username" or message.
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Companion replies: render Markdown (bold, lists, code, etc.) as
+        // real formatting, then sanitize the result so nothing unsafe slips
+        // through even though it's coming from a trusted source.
+        function renderAiText(str) {
+            const html = marked.parse(str ?? '');
+            return DOMPurify.sanitize(html);
+        }
+
         // Receive incoming messages and translate according to user's selected language
         socket.on('chat message', async (data) => {
             const targetLang = langSelect.value;
@@ -221,8 +242,8 @@
             // Own messages: skip translation, show as-is
             if (isOwn) {
                 item.innerHTML = `
-                    <div class="meta"><span class="name">${data.username || 'You'}</span><span class="time">${formatTime(data.timestamp)}</span></div>
-                    <div class="body">${data.text}</div>
+                    <div class="meta"><span class="name">${escapeHtml(data.username || 'You')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                    <div class="body">${escapeHtml(data.text)}</div>
                 `;
                 messages.appendChild(item);
                 window.scrollTo(0, document.body.scrollHeight);
@@ -230,8 +251,8 @@
             }
 
             item.innerHTML = `
-                <div class="meta"><span class="name">${data.username || (isAI ? 'Companion' : 'Stranger')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
-                <div class="body"><strong>Original:</strong> ${data.text}<br><em>Translating...</em></div>
+                <div class="meta"><span class="name">${escapeHtml(data.username || (isAI ? 'Companion' : 'Stranger'))}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="body"><strong>Original:</strong> ${escapeHtml(data.text)}<br><em>Translating...</em></div>
             `;
             messages.appendChild(item);
             window.scrollTo(0, document.body.scrollHeight);
@@ -243,15 +264,22 @@
                 const result = await response.json();
 
                 if (result.translatedText) {
-                    bodyEl.innerHTML = `
-                        <strong>Original (${result.fromLang}):</strong> ${data.text}<br>
-                        <strong>Translated (${targetLang}):</strong> ${result.translatedText}
-                    `;
+                    if (isAI) {
+                        bodyEl.innerHTML = `
+                            <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${renderAiText(data.text)}<br>
+                            <strong>Translated (${escapeHtml(targetLang)}):</strong> ${renderAiText(result.translatedText)}
+                        `;
+                    } else {
+                        bodyEl.innerHTML = `
+                            <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${escapeHtml(data.text)}<br>
+                            <strong>Translated (${escapeHtml(targetLang)}):</strong> ${escapeHtml(result.translatedText)}
+                        `;
+                    }
                 } else {
-                    bodyEl.innerHTML = `${data.text}`;
+                    bodyEl.innerHTML = isAI ? renderAiText(data.text) : escapeHtml(data.text);
                 }
             } catch (err) {
-                bodyEl.innerHTML = `${data.text}`;
+                bodyEl.innerHTML = isAI ? renderAiText(data.text) : escapeHtml(data.text);
             }
 
             window.scrollTo(0, document.body.scrollHeight);
