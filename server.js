@@ -47,8 +47,8 @@ let chatHistory = []; // shared memory of the room's conversation with the AI
 const companionQueue = [];
 let isProcessingQueue = false;
 
-function enqueueCompanionRequest(prompt, username, senderId) {
-    companionQueue.push({ prompt, username, senderId });
+function enqueueCompanionRequest(prompt, username, clientId) {
+    companionQueue.push({ prompt, username, clientId });
     processCompanionQueue();
 }
 
@@ -57,16 +57,19 @@ async function processCompanionQueue() {
     isProcessingQueue = true;
 
     while (companionQueue.length > 0) {
-        const { prompt, username, senderId } = companionQueue.shift();
-        await handleCompanionRequest(prompt, username, senderId);
+        const { prompt, username, clientId } = companionQueue.shift();
+        await handleCompanionRequest(prompt, username, clientId);
     }
 
     isProcessingQueue = false;
 }
 
-async function handleCompanionRequest(prompt, username, senderId) {
+async function handleCompanionRequest(prompt, username, clientId) {
     try {
-        const shortId = senderId.slice(0, 4);
+        // clientId is a permanent per-browser ID (survives reconnects), unlike
+        // socket.id, so the AI keeps treating the same person as the same
+        // speaker even if their connection blips mid-conversation.
+        const shortId = (clientId || 'anon').replace(/-/g, '').slice(0, 4);
         const taggedPrompt = `${username} (${shortId}): ${prompt}`;
         chatHistory.push({ role: 'user', parts: [{ text: taggedPrompt }] });
 
@@ -82,6 +85,7 @@ async function handleCompanionRequest(prompt, username, senderId) {
         io.emit('chat message', {
             text: `[SYSTEM_AI]: ${reply}`,
             senderId: 'AI_COMPANION',
+            clientId: 'AI_COMPANION',
             username: 'Companion',
             timestamp: Date.now()
         });
@@ -90,6 +94,7 @@ async function handleCompanionRequest(prompt, username, senderId) {
         io.emit('chat message', {
             text: `[SYSTEM_AI]: Connection severed. Awaiting recalibration.`,
             senderId: 'AI_COMPANION',
+            clientId: 'AI_COMPANION',
             username: 'Companion',
             timestamp: Date.now()
         });
@@ -98,12 +103,31 @@ async function handleCompanionRequest(prompt, username, senderId) {
 
 // --- Live chat mechanics: usernames + typing indicators ---
 
+const RECONNECT_GRACE_MS = 4000; // ignore joins/leaves within this window as a hiccup, not a real event
+const pendingLeaves = new Map(); // clientId -> timeout handle
+
 io.on('connection', (socket) => {
     socket.data.username = 'Anonymous';
+    socket.data.clientId = null;
 
-    socket.on('join', (username) => {
-        const clean = (username || '').toString().trim().slice(0, 24);
+    socket.on('join', (payload) => {
+        // Accept either a plain username string (older client) or
+        // { username, clientId } from the current front-end.
+        const isObject = payload && typeof payload === 'object';
+        const rawUsername = isObject ? payload.username : payload;
+        const rawClientId = isObject ? payload.clientId : null;
+
+        const clean = (rawUsername || '').toString().trim().slice(0, 24);
         socket.data.username = clean || 'Anonymous';
+        socket.data.clientId = (rawClientId || socket.id).toString();
+
+        const pending = pendingLeaves.get(socket.data.clientId);
+        if (pending) {
+            // They reconnected quickly — treat it as a hiccup, not a real leave/rejoin
+            clearTimeout(pending);
+            pendingLeaves.delete(socket.data.clientId);
+            return;
+        }
 
         io.emit('chat message', {
             text: `${socket.data.username} has joined the chat`,
@@ -117,6 +141,7 @@ io.on('connection', (socket) => {
         const payload = {
             text: msg,
             senderId: socket.id,
+            clientId: socket.data.clientId,
             username: socket.data.username,
             timestamp: Date.now()
         };
@@ -127,7 +152,7 @@ io.on('connection', (socket) => {
         // If the message tags @companion, queue it for the AI to answer
         if (msg.toLowerCase().includes('@companion')) {
            const prompt = msg.replace(/@companion/ig, '').trim();
-           enqueueCompanionRequest(prompt, socket.data.username, socket.id);
+           enqueueCompanionRequest(prompt, socket.data.username, socket.data.clientId);
         }
     });
 
@@ -142,13 +167,19 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         socket.broadcast.emit('stop typing', { senderId: socket.id });
 
-        if (socket.data.username) {
-            socket.broadcast.emit('chat message', {
-                text: `${socket.data.username} has left the chat`,
-                senderId: 'SYSTEM',
-                username: 'System',
-                timestamp: Date.now()
-            });
+        if (socket.data.username && socket.data.clientId) {
+            const clientId = socket.data.clientId;
+            const name = socket.data.username;
+            const timeout = setTimeout(() => {
+                pendingLeaves.delete(clientId);
+                io.emit('chat message', {
+                    text: `${name} has left the chat`,
+                    senderId: 'SYSTEM',
+                    username: 'System',
+                    timestamp: Date.now()
+                });
+            }, RECONNECT_GRACE_MS);
+            pendingLeaves.set(clientId, timeout);
         }
     });
 });
