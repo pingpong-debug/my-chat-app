@@ -16,7 +16,6 @@ const redis = new Redis({
     url: (process.env.UPSTASH_REDIS_REST_URL || '').trim(),
     token: (process.env.UPSTASH_REDIS_REST_TOKEN || '').trim(),
 });
-const CHAT_HISTORY_KEY = 'chat:history';
 
 // Secure and cleaned environment variable initialization for modern credentials
 const CLEAN_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : "";
@@ -71,10 +70,15 @@ app.get('/api/translate', translateLimiter, async (req, res) => {
 // --- AI Companion: queue + memory ---
 
 const MAX_HISTORY_MESSAGES = 40; // ~20 back-and-forth exchanges
+const DEFAULT_ROOM = 'lobby';
 
-async function loadChatHistory() {
+function historyKeyFor(room) {
+    return `chat:history:${room}`;
+}
+
+async function loadChatHistory(room) {
     try {
-        const raw = await redis.get(CHAT_HISTORY_KEY);
+        const raw = await redis.get(historyKeyFor(room));
         if (!raw) return [];
         return typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch (err) {
@@ -83,9 +87,9 @@ async function loadChatHistory() {
     }
 }
 
-async function saveChatHistory(history) {
+async function saveChatHistory(room, history) {
     try {
-        await redis.set(CHAT_HISTORY_KEY, JSON.stringify(history));
+        await redis.set(historyKeyFor(room), JSON.stringify(history));
     } catch (err) {
         console.error('Redis save error (this reply will not be remembered):', err);
     }
@@ -94,8 +98,8 @@ async function saveChatHistory(history) {
 const companionQueue = [];
 let isProcessingQueue = false;
 
-function enqueueCompanionRequest(prompt, username, clientId) {
-    companionQueue.push({ prompt, username, clientId });
+function enqueueCompanionRequest(prompt, username, clientId, room) {
+    companionQueue.push({ prompt, username, clientId, room });
     processCompanionQueue();
 }
 
@@ -104,14 +108,14 @@ async function processCompanionQueue() {
     isProcessingQueue = true;
 
     while (companionQueue.length > 0) {
-        const { prompt, username, clientId } = companionQueue.shift();
-        await handleCompanionRequest(prompt, username, clientId);
+        const { prompt, username, clientId, room } = companionQueue.shift();
+        await handleCompanionRequest(prompt, username, clientId, room);
     }
 
     isProcessingQueue = false;
 }
 
-async function handleCompanionRequest(prompt, username, clientId) {
+async function handleCompanionRequest(prompt, username, clientId, room) {
     try {
         // clientId is a permanent per-browser ID (survives reconnects), unlike
         // socket.id, so the AI keeps treating the same person as the same
@@ -119,7 +123,7 @@ async function handleCompanionRequest(prompt, username, clientId) {
         const shortId = (clientId || 'anon').replace(/-/g, '').slice(0, 4);
         const taggedPrompt = `${username} (${shortId}): ${prompt}`;
 
-        let chatHistory = await loadChatHistory();
+        let chatHistory = await loadChatHistory(room);
         chatHistory.push({ role: 'user', parts: [{ text: taggedPrompt }] });
 
         if (chatHistory.length > MAX_HISTORY_MESSAGES) {
@@ -130,9 +134,9 @@ async function handleCompanionRequest(prompt, username, clientId) {
         const reply = result.response.text();
 
         chatHistory.push({ role: 'model', parts: [{ text: reply }] });
-        await saveChatHistory(chatHistory);
+        await saveChatHistory(room, chatHistory);
 
-        io.emit('chat message', {
+        io.to(room).emit('chat message', {
             text: reply,
             senderId: 'AI_COMPANION',
             clientId: 'AI_COMPANION',
@@ -149,7 +153,7 @@ async function handleCompanionRequest(prompt, username, clientId) {
             ? "Daily thinking quota exhausted. Recalibrating — available again once the free tier resets tomorrow."
             : "Connection severed. Awaiting recalibration.";
 
-        io.emit('chat message', {
+        io.to(room).emit('chat message', {
             text: failureText,
             senderId: 'AI_COMPANION',
             clientId: 'AI_COMPANION',
@@ -159,35 +163,42 @@ async function handleCompanionRequest(prompt, username, clientId) {
     }
 }
 
-// --- Live chat mechanics: usernames + typing indicators ---
+// --- Live chat mechanics: usernames, rooms, typing indicators ---
 
 const RECONNECT_GRACE_MS = 4000; // ignore joins/leaves within this window as a hiccup, not a real event
-const pendingLeaves = new Map(); // clientId -> timeout handle
+const pendingLeaves = new Map(); // "room:clientId" -> timeout handle
 
 io.on('connection', (socket) => {
     socket.data.username = 'Anonymous';
     socket.data.clientId = null;
+    socket.data.room = DEFAULT_ROOM;
 
     socket.on('join', (payload) => {
         // Accept either a plain username string (older client) or
-        // { username, clientId } from the current front-end.
+        // { username, clientId, room } from the current front-end.
         const isObject = payload && typeof payload === 'object';
         const rawUsername = isObject ? payload.username : payload;
         const rawClientId = isObject ? payload.clientId : null;
+        const rawRoom = isObject ? payload.room : null;
 
         const clean = (rawUsername || '').toString().trim().slice(0, 24);
         socket.data.username = clean || 'Anonymous';
         socket.data.clientId = (rawClientId || socket.id).toString();
 
-        const pending = pendingLeaves.get(socket.data.clientId);
+        const room = (rawRoom || '').toString().trim().toLowerCase().slice(0, 24) || DEFAULT_ROOM;
+        socket.data.room = room;
+        socket.join(room);
+
+        const leaveKey = `${room}:${socket.data.clientId}`;
+        const pending = pendingLeaves.get(leaveKey);
         if (pending) {
             // They reconnected quickly — treat it as a hiccup, not a real leave/rejoin
             clearTimeout(pending);
-            pendingLeaves.delete(socket.data.clientId);
+            pendingLeaves.delete(leaveKey);
             return;
         }
 
-        io.emit('chat message', {
+        io.to(room).emit('chat message', {
             text: `${socket.data.username} has joined the chat`,
             senderId: 'SYSTEM',
             username: 'System',
@@ -196,6 +207,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('chat message', (msg) => {
+        const room = socket.data.room || DEFAULT_ROOM;
         const payload = {
             text: msg,
             senderId: socket.id,
@@ -204,40 +216,44 @@ io.on('connection', (socket) => {
             timestamp: Date.now()
         };
 
-        // Broadcast the user's original message
-        io.emit('chat message', payload);
+        // Broadcast the user's original message, scoped to their room only
+        io.to(room).emit('chat message', payload);
 
         // If the message tags @companion, queue it for the AI to answer
         if (msg.toLowerCase().includes('@companion')) {
            const prompt = msg.replace(/@companion/ig, '').trim();
-           enqueueCompanionRequest(prompt, socket.data.username, socket.data.clientId);
+           enqueueCompanionRequest(prompt, socket.data.username, socket.data.clientId, room);
         }
     });
 
     socket.on('typing', () => {
-        socket.broadcast.emit('typing', { username: socket.data.username, senderId: socket.id });
+        const room = socket.data.room || DEFAULT_ROOM;
+        socket.to(room).emit('typing', { username: socket.data.username, senderId: socket.id });
     });
 
     socket.on('stop typing', () => {
-        socket.broadcast.emit('stop typing', { senderId: socket.id });
+        const room = socket.data.room || DEFAULT_ROOM;
+        socket.to(room).emit('stop typing', { senderId: socket.id });
     });
 
     socket.on('disconnect', () => {
-        socket.broadcast.emit('stop typing', { senderId: socket.id });
+        const room = socket.data.room || DEFAULT_ROOM;
+        socket.to(room).emit('stop typing', { senderId: socket.id });
 
         if (socket.data.username && socket.data.clientId) {
             const clientId = socket.data.clientId;
             const name = socket.data.username;
+            const leaveKey = `${room}:${clientId}`;
             const timeout = setTimeout(() => {
-                pendingLeaves.delete(clientId);
-                io.emit('chat message', {
+                pendingLeaves.delete(leaveKey);
+                io.to(room).emit('chat message', {
                     text: `${name} has left the chat`,
                     senderId: 'SYSTEM',
                     username: 'System',
                     timestamp: Date.now()
                 });
             }, RECONNECT_GRACE_MS);
-            pendingLeaves.set(clientId, timeout);
+            pendingLeaves.set(leaveKey, timeout);
         }
     });
 });
