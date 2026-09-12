@@ -179,6 +179,70 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
     }
 }
 
+// --- Slash commands ---
+
+async function handleSlashCommand(raw, socket, room) {
+    const [commandRaw, ...rest] = raw.slice(1).split(/\s+/);
+    const command = (commandRaw || '').toLowerCase();
+    const argsText = rest.join(' ').trim();
+    const username = socket.data.username;
+    const clientId = socket.data.clientId;
+
+    // socket.emit (not io.to) — these go only to the person who typed the
+    // command, since they're usage help / private confirmations, not
+    // something the whole room needs to see.
+    function notifySelf(text) {
+        socket.emit('chat message', {
+            text,
+            senderId: 'SYSTEM',
+            username: 'System',
+            timestamp: Date.now()
+        });
+    }
+
+    switch (command) {
+        case 'clear': {
+            await saveChatHistory(room, []);
+            io.to(room).emit('chat message', {
+                text: `${username} cleared the companion's memory for this room.`,
+                senderId: 'SYSTEM',
+                username: 'System',
+                timestamp: Date.now()
+            });
+            break;
+        }
+
+        case 'summarize': {
+            enqueueCompanionRequest(
+                'Summarize the conversation in this room so far, in a few concise sentences.',
+                username,
+                clientId,
+                room
+            );
+            break;
+        }
+
+        case 'roast': {
+            const target = argsText.replace(/^@/, '').trim();
+            if (!target) {
+                notifySelf('Usage: /roast @username');
+                break;
+            }
+            enqueueCompanionRequest(
+                `Give a lighthearted, witty roast of the user "${target}" based on what they've said in the conversation so far. Keep it playful and good-natured, not mean-spirited or offensive.`,
+                username,
+                clientId,
+                room
+            );
+            break;
+        }
+
+        default: {
+            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear`);
+        }
+    }
+}
+
 // --- Live chat mechanics: usernames, rooms, typing indicators ---
 
 const RECONNECT_GRACE_MS = 4000; // ignore joins/leaves within this window as a hiccup, not a real event
@@ -232,6 +296,16 @@ io.on('connection', (socket) => {
 
     socket.on('chat message', (msg) => {
         const room = socket.data.room || DEFAULT_ROOM;
+        const trimmed = (msg || '').trim();
+
+        // Slash commands are handled separately and never broadcast as a
+        // normal chat message — only their result (a system note or an AI
+        // reply) shows up in the room.
+        if (trimmed.startsWith('/')) {
+            handleSlashCommand(trimmed, socket, room);
+            return;
+        }
+
         const payload = {
             text: msg,
             senderId: socket.id,
