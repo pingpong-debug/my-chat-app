@@ -322,6 +322,43 @@ body {
     letter-spacing: 1px;
 }
 
+/* Markdown content rendered inside the AI's replies */
+#messages li .body p {
+    margin: 0.4em 0;
+}
+
+#messages li .body ul,
+#messages li .body ol {
+    margin: 0.4em 0;
+    padding-left: 1.4em;
+}
+
+#messages li .body code {
+    background: #0c0c0c;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+    font-size: 0.85em;
+}
+
+#messages li .body pre {
+    background: #0c0c0c;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.6em 0.8em;
+    overflow-x: auto;
+}
+
+#messages li .body pre code {
+    background: none;
+    border: none;
+    padding: 0;
+}
+
+#messages li .body a {
+    color: #ff6666;
+}
+
 /* ---------- Typing Indicator ---------- */
 #typing-indicator {
     position: fixed;
