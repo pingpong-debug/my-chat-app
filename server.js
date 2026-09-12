@@ -9,9 +9,13 @@ const { Redis } = require('@upstash/redis');
 const rateLimit = require('express-rate-limit');
 
 // Persistent store for chat history — survives server restarts/sleep,
-// unlike the old in-memory array. Reads UPSTASH_REDIS_REST_URL and
-// UPSTASH_REDIS_REST_TOKEN from the environment automatically.
-const redis = Redis.fromEnv();
+// unlike the old in-memory array. Trimmed the same way as the Gemini key,
+// since a stray space/newline pasted into Render's Environment tab causes
+// exactly this kind of hard-to-spot connection error.
+const redis = new Redis({
+    url: (process.env.UPSTASH_REDIS_REST_URL || '').trim(),
+    token: (process.env.UPSTASH_REDIS_REST_TOKEN || '').trim(),
+});
 const CHAT_HISTORY_KEY = 'chat:history';
 
 // Secure and cleaned environment variable initialization for modern credentials
@@ -25,6 +29,11 @@ const model = genAI.getGenerativeModel({
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+
+// Render sits in front of your app as a reverse proxy — this tells Express
+// to trust the IP address it forwards along, which express-rate-limit needs
+// to tell visitors apart correctly.
+app.set('trust proxy', 1);
 
 app.use(express.static('public'));
 
