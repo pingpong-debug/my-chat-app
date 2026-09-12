@@ -146,6 +146,41 @@ body {
     visibility: hidden;
 }
 
+.room-code-box {
+    position: absolute;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.3rem;
+}
+
+.room-code-box label {
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 2px;
+    color: #666;
+}
+
+.room-code-box input {
+    background: transparent;
+    border: 1px solid #333;
+    color: #ffffff;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.85rem;
+    letter-spacing: 1px;
+    text-align: right;
+    padding: 0.4rem 0.8rem;
+    border-radius: 20px;
+    outline: none;
+    width: 110px;
+}
+
+.room-code-box input:focus {
+    border-color: #cc0000;
+}
+
 /* ---------- Top-Center Floating Menu ---------- */
 #top-bar {
     position: fixed;
