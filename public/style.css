@@ -236,7 +236,8 @@ body {
     word-break: break-word;
 }
 
-#identity-edit {
+#identity-edit,
+#copy-invite {
     background: transparent;
     border: 1px solid #444;
     color: #ccc;
