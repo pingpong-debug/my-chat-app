@@ -103,6 +103,13 @@ io.on('connection', (socket) => {
     socket.on('join', (username) => {
         const clean = (username || '').toString().trim().slice(0, 24);
         socket.data.username = clean || 'Anonymous';
+
+        io.emit('chat message', {
+            text: `${socket.data.username} has joined the chat`,
+            senderId: 'SYSTEM',
+            username: 'System',
+            timestamp: Date.now()
+        });
     });
 
     socket.on('chat message', (msg) => {
@@ -133,6 +140,15 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         socket.broadcast.emit('stop typing', { senderId: socket.id });
+
+        if (socket.data.username) {
+            socket.broadcast.emit('chat message', {
+                text: `${socket.data.username} has left the chat`,
+                senderId: 'SYSTEM',
+                username: 'System',
+                timestamp: Date.now()
+            });
+        }
     });
 });
 
