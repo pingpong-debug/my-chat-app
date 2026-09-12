@@ -351,6 +351,24 @@ body {
     font-size: 0.75rem;
 }
 
+.speak-btn {
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 50%;
+    width: 1.6rem;
+    height: 1.6rem;
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    margin-left: 0.4rem;
+    flex-shrink: 0;
+}
+
+.speak-btn:hover {
+    border-color: #cc0000;
+}
+
 #messages li strong {
     font-family: 'NDot 45', sans-serif;
     color: #cc0000;
