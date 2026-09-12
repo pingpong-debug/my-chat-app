@@ -39,25 +39,61 @@ app.get('/api/translate', async (req, res) => {
     }
 });
 
+// --- AI Companion: queue + memory ---
+
+const MAX_HISTORY_MESSAGES = 40; // ~20 back-and-forth exchanges
+let chatHistory = []; // shared memory of the room's conversation with the AI
+
+const companionQueue = [];
+let isProcessingQueue = false;
+
+function enqueueCompanionRequest(prompt) {
+    companionQueue.push(prompt);
+    processCompanionQueue();
+}
+
+async function processCompanionQueue() {
+    if (isProcessingQueue) return; // already working through the queue
+    isProcessingQueue = true;
+
+    while (companionQueue.length > 0) {
+        const prompt = companionQueue.shift();
+        await handleCompanionRequest(prompt);
+    }
+
+    isProcessingQueue = false;
+}
+
+async function handleCompanionRequest(prompt) {
+    try {
+        chatHistory.push({ role: 'user', parts: [{ text: prompt }] });
+
+        // Keep memory from growing forever
+        if (chatHistory.length > MAX_HISTORY_MESSAGES) {
+            chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
+        }
+
+        const result = await model.generateContent({ contents: chatHistory });
+        const reply = result.response.text();
+
+        chatHistory.push({ role: 'model', parts: [{ text: reply }] });
+
+        io.emit('chat message', { text: `[SYSTEM_AI]: ${reply}`, senderId: 'AI_COMPANION' });
+    } catch (error) {
+        console.error("AI Error:", error);
+        io.emit('chat message', { text: `[SYSTEM_AI]: Connection severed. Awaiting recalibration.`, senderId: 'AI_COMPANION' });
+    }
+}
+
 io.on('connection', (socket) => {
-    socket.on('chat message', async (msg) => {
+    socket.on('chat message', (msg) => {
         // Broadcast the user's original message
         io.emit('chat message', { text: msg, senderId: socket.id });
 
-        // If the message tags @companion, the AI generates a response
+        // If the message tags @companion, queue it for the AI to answer
         if (msg.toLowerCase().includes('@companion')) {
-            try {
-                // Remove the tag so the AI just reads the prompt
-                const prompt = msg.replace(/@companion/ig, '').trim(); 
-                const aiResponse = await model.generateContent(prompt);
-                const reply = aiResponse.response.text();
-                
-                // Broadcast the AI's response to the chat
-                io.emit('chat message', { text: `[SYSTEM_AI]: ${reply}`, senderId: 'AI_COMPANION' });
-            } catch (error) {
-                console.error("AI Error:", error);
-                io.emit('chat message', { text: `[SYSTEM_AI]: Connection severed. Awaiting recalibration.`, senderId: 'AI_COMPANION' });
-            }
+            const prompt = msg.replace(/@companion/ig, '').trim();
+            enqueueCompanionRequest(prompt);
         }
     });
 });
