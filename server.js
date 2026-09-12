@@ -97,12 +97,23 @@ async function handleCompanionRequest(prompt) {
 
 // --- Live chat mechanics: usernames + typing indicators ---
 
+const RECONNECT_GRACE_MS = 4000; // ignore joins/leaves within this window as a hiccup, not a real event
+const pendingLeaves = new Map(); // username -> timeout handle
+
 io.on('connection', (socket) => {
     socket.data.username = 'Anonymous';
 
     socket.on('join', (username) => {
         const clean = (username || '').toString().trim().slice(0, 24);
         socket.data.username = clean || 'Anonymous';
+
+        const pending = pendingLeaves.get(socket.data.username);
+        if (pending) {
+            // They reconnected quickly — treat it as a hiccup, not a real leave/rejoin
+            clearTimeout(pending);
+            pendingLeaves.delete(socket.data.username);
+            return;
+        }
 
         io.emit('chat message', {
             text: `${socket.data.username} has joined the chat`,
@@ -142,12 +153,17 @@ io.on('connection', (socket) => {
         socket.broadcast.emit('stop typing', { senderId: socket.id });
 
         if (socket.data.username) {
-            socket.broadcast.emit('chat message', {
-                text: `${socket.data.username} has left the chat`,
-                senderId: 'SYSTEM',
-                username: 'System',
-                timestamp: Date.now()
-            });
+            const name = socket.data.username;
+            const timeout = setTimeout(() => {
+                pendingLeaves.delete(name);
+                io.emit('chat message', {
+                    text: `${name} has left the chat`,
+                    senderId: 'SYSTEM',
+                    username: 'System',
+                    timestamp: Date.now()
+                });
+            }, RECONNECT_GRACE_MS);
+            pendingLeaves.set(name, timeout);
         }
     });
 });
