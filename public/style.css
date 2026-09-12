@@ -278,6 +278,19 @@ body {
     background: #171717;
 }
 
+#messages li.system-note {
+    align-self: center;
+    background: transparent;
+    border: none;
+    color: #777;
+    font-size: 0.8rem;
+    text-align: center;
+    max-width: 90%;
+    padding: 0.25rem 1rem;
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.3px;
+}
+
 #messages li .meta {
     display: flex;
     justify-content: space-between;
