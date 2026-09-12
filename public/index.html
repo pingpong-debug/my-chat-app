@@ -259,11 +259,72 @@
             return DOMPurify.sanitize(html);
         }
 
+        // --- Streaming companion replies ---
+        const streamingMessages = new Map(); // replyId -> { bodyEl, rawText }
+
+        socket.on('companion message start', (data) => {
+            const item = document.createElement('li');
+            item.className = 'ai';
+            item.innerHTML = `
+                <div class="meta"><span class="name">${escapeHtml(data.username || 'Companion')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="body"></div>
+            `;
+            messages.appendChild(item);
+            window.scrollTo(0, document.body.scrollHeight);
+
+            streamingMessages.set(data.replyId, {
+                bodyEl: item.querySelector('.body'),
+                rawText: ''
+            });
+        });
+
+        socket.on('companion message chunk', (data) => {
+            const entry = streamingMessages.get(data.replyId);
+            if (!entry) return;
+            entry.rawText += data.delta;
+            entry.bodyEl.textContent = entry.rawText; // plain text while streaming
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+
+        socket.on('companion message end', async (data) => {
+            const entry = streamingMessages.get(data.replyId);
+            streamingMessages.delete(data.replyId);
+            if (!entry) return;
+
+            const { bodyEl } = entry;
+            const finalText = data.text ?? entry.rawText;
+
+            if (data.error) {
+                bodyEl.textContent = finalText;
+                window.scrollTo(0, document.body.scrollHeight);
+                return;
+            }
+
+            bodyEl.innerHTML = renderAiText(finalText);
+            window.scrollTo(0, document.body.scrollHeight);
+
+            // Same translate step the regular message flow does, just applied
+            // after the fact instead of blocking the initial render.
+            const targetLang = langSelect.value;
+            try {
+                const response = await fetch(`/api/translate?text=${encodeURIComponent(finalText)}&target=${targetLang}`);
+                const result = await response.json();
+                if (result.translatedText) {
+                    bodyEl.innerHTML = `
+                        <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${renderAiText(finalText)}<br>
+                        <strong>Translated (${escapeHtml(targetLang)}):</strong> ${renderAiText(result.translatedText)}
+                    `;
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+            } catch (err) {
+                // Keep showing the untranslated rendered reply — no need to surface this
+            }
+        });
+
         // Receive incoming messages and translate according to user's selected language
         socket.on('chat message', async (data) => {
             const targetLang = langSelect.value;
             const isOwn = data.clientId === clientId;
-            const isAI = data.senderId === 'AI_COMPANION';
             const isSystem = data.senderId === 'SYSTEM';
 
             if (data.senderId) {
@@ -277,7 +338,7 @@
             }
 
             const item = document.createElement('li');
-            item.className = isOwn ? 'own' : (isAI ? 'ai' : 'other');
+            item.className = isOwn ? 'own' : 'other';
 
             // Own messages: skip translation, show as-is
             if (isOwn) {
@@ -291,7 +352,7 @@
             }
 
             item.innerHTML = `
-                <div class="meta"><span class="name">${escapeHtml(data.username || (isAI ? 'Companion' : 'Stranger'))}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="meta"><span class="name">${escapeHtml(data.username || 'Stranger')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
                 <div class="body"><strong>Original:</strong> ${escapeHtml(data.text)}<br><em>Translating...</em></div>
             `;
             messages.appendChild(item);
@@ -304,22 +365,15 @@
                 const result = await response.json();
 
                 if (result.translatedText) {
-                    if (isAI) {
-                        bodyEl.innerHTML = `
-                            <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${renderAiText(data.text)}<br>
-                            <strong>Translated (${escapeHtml(targetLang)}):</strong> ${renderAiText(result.translatedText)}
-                        `;
-                    } else {
-                        bodyEl.innerHTML = `
-                            <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${escapeHtml(data.text)}<br>
-                            <strong>Translated (${escapeHtml(targetLang)}):</strong> ${escapeHtml(result.translatedText)}
-                        `;
-                    }
+                    bodyEl.innerHTML = `
+                        <strong>Original (${escapeHtml(result.fromLang)}):</strong> ${escapeHtml(data.text)}<br>
+                        <strong>Translated (${escapeHtml(targetLang)}):</strong> ${escapeHtml(result.translatedText)}
+                    `;
                 } else {
-                    bodyEl.innerHTML = isAI ? renderAiText(data.text) : escapeHtml(data.text);
+                    bodyEl.innerHTML = escapeHtml(data.text);
                 }
             } catch (err) {
-                bodyEl.innerHTML = isAI ? renderAiText(data.text) : escapeHtml(data.text);
+                bodyEl.innerHTML = escapeHtml(data.text);
             }
 
             window.scrollTo(0, document.body.scrollHeight);
