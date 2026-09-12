@@ -7,16 +7,44 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- Connection / Join Overlay -->
+    <div id="connection-overlay" class="overlay">
+        <div class="connect-container">
+            <h1 class="system-title">SYSTEM_LINK</h1>
+            <input id="join-input" class="name-input" autocomplete="off" maxlength="24" placeholder="ENTER CALLSIGN" />
+            <button id="connect-btn" class="connect-btn">
+                <span class="btn-text">INITIALIZE CONNECTION</span>
+                <div class="pulse-ring"></div>
+            </button>
+        </div>
+    </div>
+
     <!-- Language Selection Header -->
     <div id="top-bar">
         <label for="lang-select">Translate incoming messages to:</label>
         <select id="lang-select">
-		<option value="en">Loading languages...</option>
-		</select>
+            <option value="en">Loading languages...</option>
+        </select>
+    </div>
+
+    <!-- Identity Control -->
+    <div id="identity-menu">
+        <button id="identity-toggle" type="button">•••</button>
+        <div id="identity-panel">
+            <span id="identity-label">Signed in as</span>
+            <strong id="identity-name">—</strong>
+            <button id="identity-edit" type="button">Change name</button>
+        </div>
     </div>
 
     <!-- Chat Message Container -->
     <ul id="messages"></ul>
+
+    <!-- Typing Indicator -->
+    <div id="typing-indicator">
+        <span id="typing-text"></span>
+        <span class="typing-dots"><i></i><i></i><i></i></span>
+    </div>
 
     <!-- Input Form -->
     <form id="form">
@@ -31,19 +59,68 @@
         const input = document.getElementById('input');
         const messages = document.getElementById('messages');
         const langSelect = document.getElementById('lang-select');
-		// Automatically fetch all 130+ languages and build the dropdown
-fetch('/api/languages')
-    .then(res => res.json())
-    .then(langs => {
-        langSelect.innerHTML = ''; 
-        langs.forEach(lang => {
-            const option = document.createElement('option');
-            option.value = lang.code;
-            option.textContent = lang.name;
-            if (lang.code === 'en') option.selected = true; // Set default language
-            langSelect.appendChild(option);
+
+        // --- Connection overlay + join flow ---
+        const overlay = document.getElementById('connection-overlay');
+        const connectBtn = document.getElementById('connect-btn');
+        const btnText = connectBtn.querySelector('.btn-text');
+        const joinInput = document.getElementById('join-input');
+        const identityName = document.getElementById('identity-name');
+
+        let username = localStorage.getItem('chatUsername') || '';
+        if (username) joinInput.value = username;
+
+        function enterChat(name) {
+            username = (name || '').trim().slice(0, 24) || 'Anonymous';
+            localStorage.setItem('chatUsername', username);
+            identityName.textContent = username;
+            socket.emit('join', username);
+
+            btnText.innerText = "CONNECTING...";
+            setTimeout(() => {
+                overlay.classList.add('fade-out');
+                input.focus();
+            }, 600);
+        }
+
+        connectBtn.addEventListener('click', () => enterChat(joinInput.value));
+        joinInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') enterChat(joinInput.value);
         });
-    });
+
+        // Re-announce identity if the server restarts/reconnects
+        socket.on('connect', () => {
+            if (username) socket.emit('join', username);
+        });
+
+        // --- Identity menu (•••) ---
+        const identityToggle = document.getElementById('identity-toggle');
+        const identityPanel = document.getElementById('identity-panel');
+        const identityEdit = document.getElementById('identity-edit');
+
+        identityToggle.addEventListener('click', () => {
+            identityPanel.classList.toggle('open');
+        });
+        identityEdit.addEventListener('click', () => {
+            identityPanel.classList.remove('open');
+            joinInput.value = username;
+            btnText.innerText = "INITIALIZE CONNECTION";
+            overlay.classList.remove('fade-out');
+        });
+
+        // Automatically fetch all 130+ languages and build the dropdown
+        fetch('/api/languages')
+            .then(res => res.json())
+            .then(langs => {
+                langSelect.innerHTML = '';
+                langs.forEach(lang => {
+                    const option = document.createElement('option');
+                    option.value = lang.code;
+                    option.textContent = lang.name;
+                    if (lang.code === 'en') option.selected = true; // Set default language
+                    langSelect.appendChild(option);
+                });
+            });
 
         // Form submission: sends message in whatever language the user types
         form.addEventListener('submit', (e) => {
@@ -51,32 +128,98 @@ fetch('/api/languages')
             if (input.value.trim()) {
                 socket.emit('chat message', input.value.trim());
                 input.value = '';
+                socket.emit('stop typing');
             }
         });
+
+        // --- Typing indicator (outgoing) ---
+        let typingTimeout = null;
+        input.addEventListener('input', () => {
+            socket.emit('typing');
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => socket.emit('stop typing'), 1500);
+        });
+
+        // --- Typing indicator (incoming) ---
+        const typingIndicator = document.getElementById('typing-indicator');
+        const typingText = document.getElementById('typing-text');
+        const typingUsers = new Map(); // senderId -> username
+
+        function renderTypingState() {
+            const names = [...typingUsers.values()];
+            if (names.length === 0) {
+                typingIndicator.classList.remove('visible');
+                return;
+            }
+            const label = names.length === 1
+                ? `${names[0]} is typing`
+                : `${names.slice(0, 2).join(', ')}${names.length > 2 ? ' and others' : ''} are typing`;
+            typingText.textContent = label;
+            typingIndicator.classList.add('visible');
+        }
+
+        socket.on('typing', (data) => {
+            typingUsers.set(data.senderId, data.username || 'Someone');
+            renderTypingState();
+        });
+        socket.on('stop typing', (data) => {
+            typingUsers.delete(data.senderId);
+            renderTypingState();
+        });
+
+        function formatTime(ts) {
+            const d = new Date(ts || Date.now());
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
 
         // Receive incoming messages and translate according to user's selected language
         socket.on('chat message', async (data) => {
             const targetLang = langSelect.value;
+            const isOwn = data.senderId === socket.id;
+            const isAI = data.senderId === 'AI_COMPANION';
+
+            if (data.senderId) {
+                typingUsers.delete(data.senderId);
+                renderTypingState();
+            }
 
             const item = document.createElement('li');
-            item.innerHTML = `<strong>Original:</strong> ${data.text}<br><em>Translating...</em>`;
+            item.className = isOwn ? 'own' : (isAI ? 'ai' : 'other');
+
+            // Own messages: skip translation, show as-is
+            if (isOwn) {
+                item.innerHTML = `
+                    <div class="meta"><span class="name">${data.username || 'You'}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                    <div class="body">${data.text}</div>
+                `;
+                messages.appendChild(item);
+                window.scrollTo(0, document.body.scrollHeight);
+                return;
+            }
+
+            item.innerHTML = `
+                <div class="meta"><span class="name">${data.username || (isAI ? 'Companion' : 'Stranger')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="body"><strong>Original:</strong> ${data.text}<br><em>Translating...</em></div>
+            `;
             messages.appendChild(item);
             window.scrollTo(0, document.body.scrollHeight);
+
+            const bodyEl = item.querySelector('.body');
 
             try {
                 const response = await fetch(`/api/translate?text=${encodeURIComponent(data.text)}&target=${targetLang}`);
                 const result = await response.json();
 
                 if (result.translatedText) {
-                    item.innerHTML = `
+                    bodyEl.innerHTML = `
                         <strong>Original (${result.fromLang}):</strong> ${data.text}<br>
                         <strong>Translated (${targetLang}):</strong> ${result.translatedText}
                     `;
                 } else {
-                    item.innerHTML = `${data.text}`;
+                    bodyEl.innerHTML = `${data.text}`;
                 }
             } catch (err) {
-                item.innerHTML = `${data.text}`;
+                bodyEl.innerHTML = `${data.text}`;
             }
 
             window.scrollTo(0, document.body.scrollHeight);
