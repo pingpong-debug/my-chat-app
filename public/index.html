@@ -121,33 +121,58 @@
             return audioCtx;
         }
 
-        function playTone({ freq = 440, duration = 0.08, type = 'sine', gain = 0.05, delay = 0 } = {}) {
+        function playTone({ freq = 440, endFreq = null, duration = 0.15, type = 'sine', gain = 0.06, delay = 0, filterFreq = 3200 } = {}) {
             const ctx = getAudioCtx();
             if (!ctx) return;
 
             const osc = ctx.createOscillator();
             const gainNode = ctx.createGain();
+            const filter = ctx.createBiquadFilter();
+
             osc.type = type;
-            osc.frequency.value = freq;
+            filter.type = 'lowpass';
+            filter.frequency.value = filterFreq;
+            filter.Q.value = 0.7;
 
             const startAt = ctx.currentTime + delay;
-            gainNode.gain.setValueAtTime(0, startAt);
-            gainNode.gain.linearRampToValueAtTime(gain, startAt + 0.005);
+            osc.frequency.setValueAtTime(freq, startAt);
+            if (endFreq) {
+                // A gentle pitch glide instead of a flat tone — reads as a
+                // soft "pop"/"swoop" rather than a chiptune beep.
+                osc.frequency.exponentialRampToValueAtTime(endFreq, startAt + duration);
+            }
+
+            // Slow-ish attack and a smooth exponential release, rather than
+            // an instant on/off, is what takes the "buzzer" edge off.
+            gainNode.gain.setValueAtTime(0.0001, startAt);
+            gainNode.gain.exponentialRampToValueAtTime(gain, startAt + duration * 0.25);
             gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
 
-            osc.connect(gainNode).connect(ctx.destination);
+            osc.connect(filter).connect(gainNode).connect(ctx.destination);
             osc.start(startAt);
-            osc.stop(startAt + duration + 0.02);
+            osc.stop(startAt + duration + 0.03);
         }
 
         const sounds = {
-            send: () => playTone({ freq: 720, duration: 0.05, type: 'square', gain: 0.04 }),
-            receive: () => playTone({ freq: 480, duration: 0.06, type: 'sine', gain: 0.045 }),
-            companion: () => {
-                playTone({ freq: 330, duration: 0.09, type: 'triangle', gain: 0.05 });
-                playTone({ freq: 550, duration: 0.12, type: 'triangle', gain: 0.05, delay: 0.08 });
+            // A soft upward "pop" — one sine sweeping gently up in pitch
+            send: () => playTone({ freq: 480, endFreq: 640, duration: 0.11, type: 'sine', gain: 0.05, filterFreq: 2200 }),
+
+            // A short two-note bell (root + fifth), like a muted notification chime
+            receive: () => {
+                playTone({ freq: 520, duration: 0.16, type: 'sine', gain: 0.045, filterFreq: 2600 });
+                playTone({ freq: 780, duration: 0.18, type: 'sine', gain: 0.03, filterFreq: 2600, delay: 0.02 });
             },
-            system: () => playTone({ freq: 260, duration: 0.07, type: 'sine', gain: 0.035 })
+
+            // A warm three-note ascending phrase for the AI companion — friendlier
+            // and more "arriving" than a flat beep
+            companion: () => {
+                playTone({ freq: 392, duration: 0.16, type: 'sine', gain: 0.045, filterFreq: 2000, delay: 0 });
+                playTone({ freq: 494, duration: 0.16, type: 'sine', gain: 0.045, filterFreq: 2000, delay: 0.09 });
+                playTone({ freq: 587, duration: 0.22, type: 'sine', gain: 0.04, filterFreq: 2000, delay: 0.18 });
+            },
+
+            // A very soft, low, brief thump for background events (joins/leaves/clear)
+            system: () => playTone({ freq: 300, endFreq: 220, duration: 0.14, type: 'sine', gain: 0.03, filterFreq: 1200 })
         };
 
         let hasSeenIntro = false;
