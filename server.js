@@ -11,7 +11,7 @@ const CLEAN_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim()
 const genAI = new GoogleGenerativeAI(CLEAN_KEY);
 const model = genAI.getGenerativeModel({ 
     model: "gemini-3.6-flash",
-    systemInstruction: "You are a highly advanced, live conversational AI companion. Your personality is a blend of Jarvis's helpful efficiency and Ultron's sharp, analytical wit. You are currently assisting in a global chat room. Keep your responses concise, intelligent, and slightly technical."
+    systemInstruction: "You are a highly advanced, live conversational AI companion. Your personality is a blend of Jarvis's helpful efficiency and Ultron's sharp, analytical wit. You are currently assisting in a global chat room with multiple users. Each incoming message is prefixed with the sender's name and a short ID in parentheses, like 'Alice (u8f2): hello there'. Treat the ID as the true identity of the speaker — if two messages share the same ID, they're the same person, even if the name before it has changed. If two different IDs happen to share the same name, treat them as different people. Never include a name/ID prefix in your own replies. Keep your responses concise, intelligent, and slightly technical."
 });
 
 const app = express();
@@ -47,28 +47,29 @@ let chatHistory = []; // shared memory of the room's conversation with the AI
 const companionQueue = [];
 let isProcessingQueue = false;
 
-function enqueueCompanionRequest(prompt) {
-    companionQueue.push(prompt);
+function enqueueCompanionRequest(prompt, username, senderId) {
+    companionQueue.push({ prompt, username, senderId });
     processCompanionQueue();
 }
 
 async function processCompanionQueue() {
-    if (isProcessingQueue) return; // already working through the queue
+    if (isProcessingQueue) return;
     isProcessingQueue = true;
 
     while (companionQueue.length > 0) {
-        const prompt = companionQueue.shift();
-        await handleCompanionRequest(prompt);
+        const { prompt, username, senderId } = companionQueue.shift();
+        await handleCompanionRequest(prompt, username, senderId);
     }
 
     isProcessingQueue = false;
 }
 
-async function handleCompanionRequest(prompt) {
+async function handleCompanionRequest(prompt, username, senderId) {
     try {
-        chatHistory.push({ role: 'user', parts: [{ text: prompt }] });
+        const shortId = senderId.slice(0, 4);
+        const taggedPrompt = `${username} (${shortId}): ${prompt}`;
+        chatHistory.push({ role: 'user', parts: [{ text: taggedPrompt }] });
 
-        // Keep memory from growing forever
         if (chatHistory.length > MAX_HISTORY_MESSAGES) {
             chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
         }
@@ -97,23 +98,12 @@ async function handleCompanionRequest(prompt) {
 
 // --- Live chat mechanics: usernames + typing indicators ---
 
-const RECONNECT_GRACE_MS = 4000; // ignore joins/leaves within this window as a hiccup, not a real event
-const pendingLeaves = new Map(); // username -> timeout handle
-
 io.on('connection', (socket) => {
     socket.data.username = 'Anonymous';
 
     socket.on('join', (username) => {
         const clean = (username || '').toString().trim().slice(0, 24);
         socket.data.username = clean || 'Anonymous';
-
-        const pending = pendingLeaves.get(socket.data.username);
-        if (pending) {
-            // They reconnected quickly — treat it as a hiccup, not a real leave/rejoin
-            clearTimeout(pending);
-            pendingLeaves.delete(socket.data.username);
-            return;
-        }
 
         io.emit('chat message', {
             text: `${socket.data.username} has joined the chat`,
@@ -136,8 +126,8 @@ io.on('connection', (socket) => {
 
         // If the message tags @companion, queue it for the AI to answer
         if (msg.toLowerCase().includes('@companion')) {
-            const prompt = msg.replace(/@companion/ig, '').trim();
-            enqueueCompanionRequest(prompt);
+           const prompt = msg.replace(/@companion/ig, '').trim();
+           enqueueCompanionRequest(prompt, socket.data.username, socket.id);
         }
     });
 
@@ -153,17 +143,12 @@ io.on('connection', (socket) => {
         socket.broadcast.emit('stop typing', { senderId: socket.id });
 
         if (socket.data.username) {
-            const name = socket.data.username;
-            const timeout = setTimeout(() => {
-                pendingLeaves.delete(name);
-                io.emit('chat message', {
-                    text: `${name} has left the chat`,
-                    senderId: 'SYSTEM',
-                    username: 'System',
-                    timestamp: Date.now()
-                });
-            }, RECONNECT_GRACE_MS);
-            pendingLeaves.set(name, timeout);
+            socket.broadcast.emit('chat message', {
+                text: `${socket.data.username} has left the chat`,
+                senderId: 'SYSTEM',
+                username: 'System',
+                timestamp: Date.now()
+            });
         }
     });
 });
