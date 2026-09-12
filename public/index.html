@@ -12,6 +12,7 @@
         <div class="connect-container">
             <h1 class="system-title">SYSTEM_LINK</h1>
             <input id="join-input" class="name-input" autocomplete="off" maxlength="24" placeholder="ENTER CALLSIGN" />
+            <input id="room-input" class="name-input" autocomplete="off" maxlength="24" placeholder="ROOM CODE (optional)" />
             <button id="connect-btn" class="connect-btn">
                 <span class="btn-text">INITIALIZE CONNECTION</span>
                 <div class="pulse-ring"></div>
@@ -33,7 +34,10 @@
         <div id="identity-panel">
             <span id="identity-label">Signed in as</span>
             <strong id="identity-name">—</strong>
+            <span id="identity-label">Room</span>
+            <strong id="identity-room">—</strong>
             <button id="identity-edit" type="button">Change name</button>
+            <button id="copy-invite" type="button">Copy invite link</button>
         </div>
     </div>
 
@@ -67,11 +71,20 @@
         const connectBtn = document.getElementById('connect-btn');
         const btnText = connectBtn.querySelector('.btn-text');
         const joinInput = document.getElementById('join-input');
+        const roomInput = document.getElementById('room-input');
         const identityName = document.getElementById('identity-name');
+        const identityRoom = document.getElementById('identity-room');
+
+        function getRoomFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            return (params.get('room') || '').trim().toLowerCase().slice(0, 24);
+        }
 
         let username = localStorage.getItem('chatUsername') || '';
+        let room = getRoomFromUrl() || localStorage.getItem('chatRoom') || '';
         let hasJoined = false;
         if (username) joinInput.value = username;
+        if (room) roomInput.value = room;
 
         // A permanent ID for this browser, separate from socket.id (which
         // changes every time the connection drops and reconnects).
@@ -91,12 +104,21 @@
 
         let hasSeenIntro = false;
 
-        function enterChat(name) {
+        function enterChat(name, roomCode) {
             username = (name || '').trim().slice(0, 24) || 'Anonymous';
+            room = (roomCode || '').trim().toLowerCase().slice(0, 24) || 'lobby';
             localStorage.setItem('chatUsername', username);
+            localStorage.setItem('chatRoom', room);
             identityName.textContent = username;
+            identityRoom.textContent = room;
+
+            // Reflect the room in the URL so refreshing or sharing the link keeps everyone together
+            const url = new URL(window.location);
+            url.searchParams.set('room', room);
+            window.history.replaceState({}, '', url);
+
             hasJoined = true;
-            socket.emit('join', { username, clientId });
+            socket.emit('join', { username, clientId, room });
 
             if (!hasSeenIntro) {
                 hasSeenIntro = true;
@@ -110,21 +132,25 @@
             }, 600);
         }
 
-        connectBtn.addEventListener('click', () => enterChat(joinInput.value));
+        connectBtn.addEventListener('click', () => enterChat(joinInput.value, roomInput.value));
         joinInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') enterChat(joinInput.value);
+            if (e.key === 'Enter') enterChat(joinInput.value, roomInput.value);
+        });
+        roomInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') enterChat(joinInput.value, roomInput.value);
         });
 
         // Re-announce identity only if we reconnect after already having joined
         // (e.g. the server restarted) — never on the initial silent connection.
         socket.on('connect', () => {
-            if (hasJoined) socket.emit('join', { username, clientId });
+            if (hasJoined) socket.emit('join', { username, clientId, room });
         });
 
         // --- Identity menu (•••) ---
         const identityToggle = document.getElementById('identity-toggle');
         const identityPanel = document.getElementById('identity-panel');
         const identityEdit = document.getElementById('identity-edit');
+        const copyInviteBtn = document.getElementById('copy-invite');
 
         identityToggle.addEventListener('click', () => {
             identityPanel.classList.toggle('open');
@@ -132,8 +158,19 @@
         identityEdit.addEventListener('click', () => {
             identityPanel.classList.remove('open');
             joinInput.value = username;
+            roomInput.value = room;
             btnText.innerText = "INITIALIZE CONNECTION";
             overlay.classList.remove('fade-out');
+        });
+        copyInviteBtn.addEventListener('click', async () => {
+            const originalLabel = copyInviteBtn.textContent;
+            try {
+                await navigator.clipboard.writeText(window.location.href);
+                copyInviteBtn.textContent = 'Copied!';
+            } catch (err) {
+                copyInviteBtn.textContent = 'Copy failed';
+            }
+            setTimeout(() => { copyInviteBtn.textContent = originalLabel; }, 1500);
         });
 
         // Automatically fetch all 130+ languages and build the dropdown
