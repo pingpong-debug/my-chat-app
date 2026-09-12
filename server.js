@@ -124,7 +124,7 @@ async function handleCompanionRequest(prompt, username, clientId) {
         await saveChatHistory(chatHistory);
 
         io.emit('chat message', {
-            text: `[SYSTEM_AI]: ${reply}`,
+            text: reply,
             senderId: 'AI_COMPANION',
             clientId: 'AI_COMPANION',
             username: 'Companion',
@@ -133,7 +133,7 @@ async function handleCompanionRequest(prompt, username, clientId) {
     } catch (error) {
         console.error("AI Error:", error);
         io.emit('chat message', {
-            text: `[SYSTEM_AI]: Connection severed. Awaiting recalibration.`,
+            text: `Connection severed. Awaiting recalibration.`,
             senderId: 'AI_COMPANION',
             clientId: 'AI_COMPANION',
             username: 'Companion',
