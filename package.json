@@ -13,10 +13,12 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@upstash/redis": "^1.35.0",
+    "cohere-ai": "^7.14.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^7.4.0",
     "google-translate-api-x": "^10.7.3",
+    "groq-sdk": "^0.7.0",
     "socket.io": "^4.8.3"
   }
 }
