@@ -375,6 +375,54 @@ async function executeBurn(room) {
     }, 2000);
 }
 
+// --- Interactive polls ---
+
+const POLL_DURATION_MS = 45000; // auto-closes 45s after creation
+const activePolls = new Map(); // pollId -> { room, question, options: [{text, voters:Set}], timeout }
+
+function parsePollArgs(argsText) {
+    return [...argsText.matchAll(/"([^"]+)"/g)].map(m => m[1].trim()).filter(Boolean);
+}
+
+function pollTally(poll) {
+    return poll.options.map(o => ({ text: o.text, votes: o.voters.size }));
+}
+
+function handlePollVote(pollId, optionIndex, clientId, room) {
+    const poll = activePolls.get(pollId);
+    if (!poll || poll.room !== room) return;
+    if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= poll.options.length) return;
+
+    // One vote per person — voting again just moves their vote
+    poll.options.forEach(o => o.voters.delete(clientId));
+    poll.options[optionIndex].voters.add(clientId);
+
+    io.to(room).emit('poll update', { pollId, options: pollTally(poll) });
+}
+
+function closePoll(pollId) {
+    const poll = activePolls.get(pollId);
+    if (!poll) return;
+    clearTimeout(poll.timeout);
+    activePolls.delete(pollId);
+
+    const tally = pollTally(poll);
+    io.to(poll.room).emit('poll closed', { pollId, options: tally });
+
+    const maxVotes = Math.max(0, ...tally.map(o => o.votes));
+    const winners = tally.filter(o => o.votes === maxVotes && maxVotes > 0).map(o => o.text);
+    const resultSummary = tally.map(o => `"${o.text}": ${o.votes} vote${o.votes === 1 ? '' : 's'}`).join(', ');
+    const outcomeText = winners.length === 0
+        ? 'nobody voted at all'
+        : winners.length === 1
+            ? `"${winners[0]}" won`
+            : `it ended in a tie between ${winners.map(w => `"${w}"`).join(' and ')}`;
+
+    const prompt = `A poll titled "${poll.question}" just closed in this room. Results: ${resultSummary}. ${outcomeText}. Deliver a brief, sarcastic, in-character verdict on the outcome — mock the winning choice or the voters good-naturedly, in one or two sentences.`;
+
+    enqueueCompanionRequest(prompt, 'System', 'poll-verdict', poll.room);
+}
+
 // --- Slash commands ---
 
 async function handleSlashCommand(raw, socket, room) {
@@ -502,8 +550,39 @@ async function handleSlashCommand(raw, socket, room) {
             break;
         }
 
+        case 'poll': {
+            const parts = parsePollArgs(argsText);
+            if (parts.length < 3) {
+                notifySelf('Usage: /poll "Question" "Option A" "Option B" (up to 6 options, each in quotes)');
+                break;
+            }
+
+            const [question, ...optionTexts] = parts;
+            const limitedOptions = optionTexts.slice(0, 6);
+
+            const pollId = crypto.randomUUID();
+            const poll = {
+                room,
+                question,
+                options: limitedOptions.map(text => ({ text, voters: new Set() })),
+                timeout: setTimeout(() => closePoll(pollId), POLL_DURATION_MS)
+            };
+            activePolls.set(pollId, poll);
+
+            const pollNoteText = `${username} started a poll: "${question}"`;
+            await appendTranscript(room, { type: 'system', text: pollNoteText, timestamp: Date.now() });
+
+            io.to(room).emit('poll created', {
+                pollId,
+                question,
+                options: pollTally(poll),
+                timestamp: Date.now()
+            });
+            break;
+        }
+
         default: {
-            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear, /mode <name>, /burn <now|duration|cancel>`);
+            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear, /mode <name>, /burn <now|duration|cancel>, /poll "Q" "A" "B"`);
         }
     }
 }
@@ -594,6 +673,11 @@ io.on('connection', (socket) => {
     socket.on('typing', () => {
         const room = socket.data.room || DEFAULT_ROOM;
         socket.to(room).emit('typing', { username: socket.data.username, senderId: socket.id });
+    });
+
+    socket.on('poll vote', ({ pollId, optionIndex }) => {
+        const room = socket.data.room || DEFAULT_ROOM;
+        handlePollVote(pollId, optionIndex, socket.data.clientId, room);
     });
 
     socket.on('stop typing', () => {
