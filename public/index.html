@@ -39,6 +39,20 @@
         </div>
     </div>
 
+    <!-- Code Sandbox Modal -->
+    <div id="sandbox-overlay" class="sandbox-overlay">
+        <div class="sandbox-modal">
+            <div class="sandbox-header">
+                <span class="sandbox-title">SANDBOX</span>
+                <div class="sandbox-actions">
+                    <button id="sandbox-reset" type="button" class="sandbox-reset">⟲ Reset</button>
+                    <button id="sandbox-close" type="button" class="sandbox-close">✕</button>
+                </div>
+            </div>
+            <iframe id="sandbox-frame" class="sandbox-frame" sandbox="allow-scripts"></iframe>
+        </div>
+    </div>
+
     <!-- Language Selection Header -->
     <div id="top-bar">
         <label for="lang-select">Translate incoming messages to:</label>
@@ -381,6 +395,79 @@
             return DOMPurify.sanitize(html);
         }
 
+        // --- In-chat code sandbox ---
+        const sandboxOverlay = document.getElementById('sandbox-overlay');
+        const sandboxFrame = document.getElementById('sandbox-frame');
+        const sandboxClose = document.getElementById('sandbox-close');
+        const sandboxReset = document.getElementById('sandbox-reset');
+        let currentSandboxDoc = '';
+
+        function openSandbox(code, lang) {
+            // Plain JS gets wrapped in a minimal HTML shell so it has
+            // somewhere to run; HTML snippets run as-is.
+            const doc = lang === 'html'
+                ? code
+                : `<!DOCTYPE html><html><head><style>body{font-family:sans-serif;background:#fff;color:#111;padding:1rem}</style></head><body><script>${code}<\/script></body></html>`;
+
+            currentSandboxDoc = doc;
+
+            // sandbox="allow-scripts" only (no allow-same-origin) gives the
+            // iframe an opaque, isolated origin — the snippet can run JS but
+            // can't read cookies, localStorage, or reach anything on the
+            // real page.
+            sandboxFrame.srcdoc = doc;
+            sandboxOverlay.classList.add('visible');
+        }
+
+        function closeSandbox() {
+            sandboxOverlay.classList.remove('visible');
+            sandboxFrame.srcdoc = '';
+            currentSandboxDoc = '';
+        }
+
+        function resetSandbox() {
+            if (!currentSandboxDoc) return;
+            // Clearing then re-setting srcdoc forces a full iframe reload,
+            // which kills any runaway loop, interval, or animation from the
+            // previous run — a fresh sandboxed document, same content.
+            sandboxFrame.srcdoc = '';
+            requestAnimationFrame(() => {
+                sandboxFrame.srcdoc = currentSandboxDoc;
+            });
+        }
+
+        sandboxClose.addEventListener('click', closeSandbox);
+        sandboxReset.addEventListener('click', resetSandbox);
+        sandboxOverlay.addEventListener('click', (e) => {
+            if (e.target === sandboxOverlay) closeSandbox();
+        });
+
+        // Scans a rendered AI reply for HTML/JS code blocks and attaches a
+        // "▶ RUN" button under each one. Only html/js/javascript blocks
+        // qualify — other languages (python, css alone, etc.) have nothing
+        // a browser sandbox can meaningfully execute.
+        function enhanceCodeBlocks(containerEl) {
+            const blocks = containerEl.querySelectorAll('pre > code');
+            blocks.forEach((codeEl) => {
+                const langMatch = [...codeEl.classList].find(c => c.startsWith('language-'));
+                const lang = langMatch ? langMatch.replace('language-', '').toLowerCase() : '';
+                if (lang !== 'html' && lang !== 'js' && lang !== 'javascript') return;
+
+                const preEl = codeEl.closest('pre');
+                if (!preEl || preEl.dataset.sandboxed === 'true') return;
+                preEl.dataset.sandboxed = 'true';
+
+                const runBtn = document.createElement('button');
+                runBtn.type = 'button';
+                runBtn.className = 'run-btn';
+                runBtn.textContent = '▶ RUN';
+                runBtn.addEventListener('click', () => {
+                    openSandbox(codeEl.textContent, lang === 'html' ? 'html' : 'js');
+                });
+                preEl.insertAdjacentElement('afterend', runBtn);
+            });
+        }
+
         // Strip Markdown syntax down to plain readable text, for TTS —
         // hearing "asterisk asterisk bold asterisk asterisk" out loud would
         // defeat the point.
@@ -501,6 +588,7 @@
             bodyEl.innerHTML = renderAiText(finalText);
             window.scrollTo(0, document.body.scrollHeight);
             if (item) addSpeakButton(item, bodyEl, () => finalText);
+            enhanceCodeBlocks(bodyEl);
 
             // Same translate step the regular message flow does, just applied
             // after the fact instead of blocking the initial render.
@@ -514,6 +602,7 @@
                         <strong>Translated (${escapeHtml(targetLang)}):</strong> ${renderAiText(result.translatedText)}
                     `;
                     window.scrollTo(0, document.body.scrollHeight);
+                    enhanceCodeBlocks(bodyEl);
                 }
             } catch (err) {
                 // Keep showing the untranslated rendered reply — no need to surface this
