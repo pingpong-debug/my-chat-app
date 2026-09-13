@@ -273,6 +273,57 @@
                 .replace(/'/g, '&#39;');
         }
 
+        // --- Interactive polls ---
+        function renderPollOptions(container, pollId, options, closed) {
+            const totalVotes = options.reduce((sum, o) => sum + o.votes, 0);
+            container.innerHTML = options.map((opt, i) => {
+                const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0;
+                return `
+                    <button class="poll-option" data-index="${i}" ${closed ? 'disabled' : ''} style="background: linear-gradient(to right, rgba(204,0,0,0.25) ${pct}%, transparent ${pct}%)">
+                        <span class="poll-option-text">${escapeHtml(opt.text)}</span>
+                        <span class="poll-option-votes">${opt.votes}</span>
+                    </button>
+                `;
+            }).join('');
+
+            if (!closed) {
+                container.querySelectorAll('.poll-option').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                        socket.emit('poll vote', { pollId, optionIndex: parseInt(btn.dataset.index, 10) });
+                    });
+                });
+            }
+        }
+
+        socket.on('poll created', (data) => {
+            const item = document.createElement('li');
+            item.className = 'poll';
+            item.dataset.pollId = data.pollId;
+            item.innerHTML = `
+                <div class="meta"><span class="name">Poll</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="poll-question">${escapeHtml(data.question)}</div>
+                <div class="poll-options"></div>
+                <div class="poll-status">Voting open — click an option to vote</div>
+            `;
+            messages.appendChild(item);
+            renderPollOptions(item.querySelector('.poll-options'), data.pollId, data.options, false);
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+
+        socket.on('poll update', (data) => {
+            const item = messages.querySelector(`li.poll[data-poll-id="${data.pollId}"]`);
+            if (!item) return;
+            renderPollOptions(item.querySelector('.poll-options'), data.pollId, data.options, false);
+        });
+
+        socket.on('poll closed', (data) => {
+            const item = messages.querySelector(`li.poll[data-poll-id="${data.pollId}"]`);
+            if (!item) return;
+            renderPollOptions(item.querySelector('.poll-options'), data.pollId, data.options, true);
+            const statusEl = item.querySelector('.poll-status');
+            if (statusEl) statusEl.textContent = 'Poll closed — final results';
+        });
+
         // --- Self-destruct rooms (/burn) ---
         const burnBanner = document.getElementById('burn-banner');
         const burnBannerText = document.getElementById('burn-banner-text');
