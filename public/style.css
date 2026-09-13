@@ -181,6 +181,49 @@ body {
     border-color: #cc0000;
 }
 
+/* ---------- Self-destruct countdown banner ---------- */
+#burn-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: #cc0000;
+    color: #fff;
+    text-align: center;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    letter-spacing: 2px;
+    font-size: 0.85rem;
+    padding: 0.5rem;
+    z-index: 50;
+    display: none;
+    animation: burn-pulse 1s infinite;
+}
+
+#burn-banner.visible {
+    display: block;
+}
+
+@keyframes burn-pulse {
+    50% { opacity: 0.6; }
+}
+
+/* ---------- Self-destruct takeover screen ---------- */
+#burn-overlay {
+    display: none;
+}
+
+#burn-overlay.visible {
+    display: flex;
+}
+
+.burn-message {
+    color: #999;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.9rem;
+    letter-spacing: 1px;
+    margin: 0;
+}
+
 /* ---------- Top-Center Floating Menu ---------- */
 #top-bar {
     position: fixed;
