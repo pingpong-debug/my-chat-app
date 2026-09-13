@@ -347,6 +347,15 @@ body {
     color: #999;
 }
 
+#messages li .persona-tag {
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 2px;
+    color: #666;
+    margin: -0.15rem 0 0.5rem;
+    text-transform: uppercase;
+}
+
 #messages li .time {
     color: #666;
     font-size: 0.75rem;
