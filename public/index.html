@@ -347,6 +347,7 @@
             item.className = 'ai';
             item.innerHTML = `
                 <div class="meta"><span class="name">${escapeHtml(data.username || 'Companion')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
+                <div class="persona-tag">${escapeHtml(data.persona || 'Default')} MODE</div>
                 <div class="body"></div>
             `;
             messages.appendChild(item);
