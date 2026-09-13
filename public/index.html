@@ -23,6 +23,22 @@
         </div>
     </div>
 
+    <!-- Self-destruct countdown banner -->
+    <div id="burn-banner">
+        <span id="burn-banner-text"></span>
+    </div>
+
+    <!-- Self-destruct takeover screen -->
+    <div id="burn-overlay" class="overlay">
+        <div class="connect-container">
+            <h1 class="system-title">SELF-DESTRUCT COMPLETE</h1>
+            <p class="burn-message">Room memory purged. Connection terminated.</p>
+            <button id="burn-reload-btn" class="connect-btn">
+                <span class="btn-text">RE-ESTABLISH CONNECTION</span>
+            </button>
+        </div>
+    </div>
+
     <!-- Language Selection Header -->
     <div id="top-bar">
         <label for="lang-select">Translate incoming messages to:</label>
@@ -256,6 +272,55 @@
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;');
         }
+
+        // --- Self-destruct rooms (/burn) ---
+        const burnBanner = document.getElementById('burn-banner');
+        const burnBannerText = document.getElementById('burn-banner-text');
+        const burnOverlay = document.getElementById('burn-overlay');
+        const burnReloadBtn = document.getElementById('burn-reload-btn');
+        let burnInterval = null;
+
+        function startBurnCountdown(fireAt) {
+            stopBurnCountdown();
+            burnBanner.classList.add('visible');
+
+            function tick() {
+                const remaining = Math.max(0, fireAt - Date.now());
+                if (remaining <= 0) {
+                    burnBannerText.textContent = 'PURGING...';
+                    return;
+                }
+                const totalSeconds = Math.ceil(remaining / 1000);
+                const h = Math.floor(totalSeconds / 3600);
+                const m = Math.floor((totalSeconds % 3600) / 60);
+                const s = totalSeconds % 60;
+                const parts = [];
+                if (h) parts.push(`${h}h`);
+                if (h || m) parts.push(`${m}m`);
+                parts.push(`${s}s`);
+                burnBannerText.textContent = `SELF-DESTRUCT IN ${parts.join(' ')}`;
+            }
+
+            tick();
+            burnInterval = setInterval(tick, 1000);
+        }
+
+        function stopBurnCountdown() {
+            if (burnInterval) clearInterval(burnInterval);
+            burnInterval = null;
+            burnBanner.classList.remove('visible');
+        }
+
+        socket.on('burn scheduled', (data) => startBurnCountdown(data.fireAt));
+        socket.on('burn cancelled', () => stopBurnCountdown());
+        socket.on('room burned', () => {
+            stopBurnCountdown();
+            burnOverlay.classList.add('visible');
+        });
+
+        burnReloadBtn.addEventListener('click', () => {
+            window.location.reload();
+        });
 
         // Companion replies: render Markdown (bold, lists, code, etc.) as
         // real formatting, then sanitize the result so nothing unsafe slips
