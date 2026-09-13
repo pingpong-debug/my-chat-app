@@ -946,3 +946,96 @@ body {
     outline: none;
     cursor: pointer;
 }
+
+/* ---------- Full-Dive Connection Animation ---------- */
+/* Deliberately hardcoded dark/cyan colors rather than theme variables —
+   this sequence represents a "system" transition and should look the
+   same regardless of which chat theme is active. */
+#dive-sequence {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    pointer-events: none;
+    background: radial-gradient(circle at center, #060a14 0%, #010104 75%);
+    opacity: 0;
+    transition: opacity 0.5s ease;
+}
+
+#dive-sequence.active {
+    display: flex;
+    opacity: 1;
+}
+
+#dive-sequence.fading {
+    opacity: 0;
+}
+
+.connect-container.diving-out,
+.room-code-box.diving-out {
+    opacity: 0;
+    transform: scale(0.97);
+    transition: opacity 0.35s ease, transform 0.35s ease;
+    pointer-events: none;
+}
+
+#dive-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+}
+
+#dive-canvas.visible {
+    opacity: 1;
+}
+
+#dive-ring {
+    position: absolute;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    border: 1px solid rgba(143, 233, 255, 0.8);
+    box-shadow: 0 0 24px rgba(143, 233, 255, 0.35);
+    transform: scale(0.4);
+    opacity: 0;
+}
+
+#dive-ring.handshake {
+    animation: diveHandshake 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes diveHandshake {
+    0% { transform: scale(0.4); opacity: 0; }
+    35% { transform: scale(1.25); opacity: 1; }
+    70% { transform: scale(0.85); opacity: 0.9; }
+    100% { transform: scale(1); opacity: 0; }
+}
+
+#dive-status {
+    position: relative;
+    z-index: 2;
+    color: #bdf3ff;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.95rem;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    text-shadow: 0 0 12px rgba(143, 233, 255, 0.6);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+#dive-status.visible {
+    opacity: 0.9;
+}
+
+@media (min-width: 640px) {
+    #dive-status {
+        font-size: 1.1rem;
+        letter-spacing: 6px;
+    }
+}
