@@ -21,6 +21,13 @@
             <label for="room-input">ROOM</label>
             <input id="room-input" autocomplete="off" maxlength="24" placeholder="lobby" />
         </div>
+
+        <!-- Full-dive connection sequence: hidden until Initialize Connection is clicked -->
+        <div id="dive-sequence" aria-hidden="true">
+            <div id="dive-ring"></div>
+            <canvas id="dive-canvas"></canvas>
+            <div id="dive-status"></div>
+        </div>
     </div>
 
     <!-- Self-destruct countdown banner -->
@@ -103,6 +110,7 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
         // --- Theme switcher ---
         // Applied first, before the rest of the UI sets up, so there's no
@@ -159,9 +167,389 @@
             window.scrollTo(0, document.body.scrollHeight);
         }
 
+        // --- Full-dive connection animation ---
+        const diveSequence = document.getElementById('dive-sequence');
+        const diveRing = document.getElementById('dive-ring');
+        const diveCanvas = document.getElementById('dive-canvas');
+        const diveStatus = document.getElementById('dive-status');
+        const connectContainerEl = overlay.querySelector('.connect-container');
+        const roomCodeBoxEl = overlay.querySelector('.room-code-box');
+
+        function resetDiveUI() {
+            connectBtn.disabled = false;
+            joinInput.disabled = false;
+            roomInput.disabled = false;
+            isDiving = false;
+            connectContainerEl.classList.remove('diving-out');
+            if (roomCodeBoxEl) roomCodeBoxEl.classList.remove('diving-out');
+            diveSequence.classList.remove('active', 'fading');
+            diveRing.classList.remove('handshake');
+            diveCanvas.classList.remove('visible');
+            diveStatus.classList.remove('visible');
+            diveStatus.textContent = '';
+        }
+
+        function setDiveStatus(text) {
+            diveStatus.textContent = text;
+            diveStatus.classList.add('visible');
+        }
+
+        function playDiveSequence(onComplete) {
+            const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+            connectContainerEl.classList.add('diving-out');
+            if (roomCodeBoxEl) roomCodeBoxEl.classList.add('diving-out');
+            diveSequence.classList.add('active');
+
+            // Reduced-motion path: a short fade-and-synchronize, no tunnel geometry at all.
+            if (prefersReduced) {
+                setDiveStatus('CONNECTING...');
+                setTimeout(() => {
+                    setDiveStatus('CONNECTION ESTABLISHED');
+                    setTimeout(() => {
+                        onComplete();
+                        setTimeout(resetDiveUI, 900); // after the overlay's own fade-out transition
+                    }, 500);
+                }, 500);
+                return;
+            }
+
+            // Phase 1 — Connection Initiated (0-0.4s): CSS-only handshake pulse,
+            // before the WebGL scene spins up.
+            setDiveStatus('INITIALIZING CONNECTION');
+            diveRing.classList.add('handshake');
+
+            setTimeout(() => {
+                diveCanvas.classList.add('visible');
+                runDiveTunnel(() => {
+                    onComplete();
+                    setTimeout(resetDiveUI, 900);
+                });
+            }, 400);
+        }
+
+        function runDiveTunnel(onFinished) {
+            const canvas = diveCanvas;
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            const isSmallScreen = width < 640;
+
+            const PARTICLE_COUNT = isSmallScreen ? 500 : 1200;
+            const RING_COUNT = isSmallScreen ? 4 : 7;
+            const SYMBOL_COUNT = isSmallScreen ? 4 : 8;
+            const TUNNEL_DEPTH = 60;
+            const CAMERA_Z = 6;
+            const STREAK_COUNT = Math.min(PARTICLE_COUNT, isSmallScreen ? 120 : 220);
+
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x030712, 0.045);
+
+            const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 200);
+            camera.position.z = CAMERA_Z;
+
+            let renderer;
+            try {
+                renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            } catch (err) {
+                // No WebGL available — skip straight to the sync/materialize text and finish.
+                setDiveStatus('SYNCHRONIZING');
+                setTimeout(() => setDiveStatus('CONNECTION ESTABLISHED'), 400);
+                setTimeout(onFinished, 1000);
+                return;
+            }
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            renderer.setSize(width, height);
+
+            // --- Particle field (tunnel walls) ---
+            const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 1.4 + Math.random() * 2.6;
+                particlePositions[i * 3] = Math.cos(angle) * radius;
+                particlePositions[i * 3 + 1] = Math.sin(angle) * radius;
+                particlePositions[i * 3 + 2] = -Math.random() * TUNNEL_DEPTH;
+            }
+            const particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+            const particleMaterial = new THREE.PointsMaterial({
+                color: 0x8fe9ff,
+                size: 0.07,
+                transparent: true,
+                opacity: 0,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            const particles = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particles);
+
+            // --- Speed streaks (only visible once moving fast) ---
+            const streakPositions = new Float32Array(STREAK_COUNT * 2 * 3);
+            const streakGeometry = new THREE.BufferGeometry();
+            streakGeometry.setAttribute('position', new THREE.BufferAttribute(streakPositions, 3));
+            const streakMaterial = new THREE.LineBasicMaterial({
+                color: 0xbdf3ff,
+                transparent: true,
+                opacity: 0,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            const streaks = new THREE.LineSegments(streakGeometry, streakMaterial);
+            scene.add(streaks);
+
+            // --- Rings and arcs ---
+            const rings = [];
+            for (let i = 0; i < RING_COUNT; i++) {
+                const isArc = i % 3 === 0;
+                const radius = 1.2 + Math.random() * 2.2;
+                const geometry = isArc
+                    ? new THREE.RingGeometry(radius, radius + 0.03, 48, 1, 0, Math.PI * (0.3 + Math.random() * 0.5))
+                    : new THREE.RingGeometry(radius, radius + 0.025, 64);
+                const material = new THREE.MeshBasicMaterial({
+                    color: i % 2 === 0 ? 0x8fe9ff : 0x5ea8ff,
+                    transparent: true,
+                    opacity: 0,
+                    side: THREE.DoubleSide,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.z = -(i / RING_COUNT) * TUNNEL_DEPTH;
+                mesh.rotation.z = Math.random() * Math.PI * 2;
+                mesh.rotation.x = (Math.random() - 0.5) * 0.3;
+                scene.add(mesh);
+                rings.push({
+                    mesh,
+                    spin: (Math.random() > 0.5 ? 1 : -1) * (0.2 + Math.random() * 0.5),
+                    baseOpacity: 0.35 + Math.random() * 0.35,
+                    fadesEarly: i % 2 === 0 // half the rings fade out during Phase 4
+                });
+            }
+
+            // --- Small geometric symbols ---
+            const symbols = [];
+            for (let i = 0; i < SYMBOL_COUNT; i++) {
+                const geometry = new THREE.IcosahedronGeometry(0.15, 0);
+                const material = new THREE.MeshBasicMaterial({
+                    color: 0xbdf3ff,
+                    wireframe: true,
+                    transparent: true,
+                    opacity: 0
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(
+                    (Math.random() - 0.5) * 5,
+                    (Math.random() - 0.5) * 5,
+                    -Math.random() * TUNNEL_DEPTH
+                );
+                scene.add(mesh);
+                symbols.push({
+                    mesh,
+                    spinX: (Math.random() - 0.5) * 0.03,
+                    spinY: (Math.random() - 0.5) * 0.03
+                });
+            }
+
+            // --- Faint grid planes (occasional light planes through the tunnel) ---
+            const grid1 = new THREE.GridHelper(10, 12, 0x3d7fa8, 0x1f3f52);
+            grid1.position.set(0, -2.5, -TUNNEL_DEPTH * 0.5);
+            grid1.material.transparent = true;
+            grid1.material.opacity = 0;
+            scene.add(grid1);
+
+            // --- Central point for Phase 6 materialization flash ---
+            const flashGeometry = new THREE.SphereGeometry(0.05, 16, 16);
+            const flashMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            const flash = new THREE.Mesh(flashGeometry, flashMaterial);
+            flash.position.z = CAMERA_Z - 3;
+            scene.add(flash);
+
+            function easeInQuad(t) { return t * t; }
+            function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
+            function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+            function lerp(a, b, t) { return a + (b - a) * t; }
+
+            // Schedule, in ms, relative to this function's own start (Phase 1's
+            // 0.4s CSS handshake already happened before this runs).
+            const T_FORMATION_END = 700;   // Phase 2
+            const T_ACCEL_END = 1400;      // Phase 3
+            const T_TUNNEL_END = 2100;     // Phase 4
+            const T_SYNC_END = 2600;       // Phase 5
+            const T_MATERIALIZE_END = 3100; // Phase 6
+
+            let speed = 0.02;
+            let syncTextShown = false;
+            let establishedTextShown = false;
+            let flashTriggered = false;
+            let completeTriggered = false;
+
+            const startTime = performance.now();
+            let rafId = null;
+
+            function handleResize() {
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+                camera.aspect = w / h;
+                camera.updateProjectionMatrix();
+                renderer.setSize(w, h);
+            }
+            window.addEventListener('resize', handleResize);
+
+            function cleanup() {
+                cancelAnimationFrame(rafId);
+                window.removeEventListener('resize', handleResize);
+                [particleGeometry, streakGeometry, flashGeometry, grid1.geometry].forEach(g => g.dispose());
+                [particleMaterial, streakMaterial, flashMaterial, grid1.material].forEach(m => m.dispose());
+                rings.forEach(r => { r.mesh.geometry.dispose(); r.mesh.material.dispose(); });
+                symbols.forEach(s => { s.mesh.geometry.dispose(); s.mesh.material.dispose(); });
+                renderer.dispose();
+                diveCanvas.classList.remove('visible');
+                diveSequence.classList.remove('fading');
+            }
+
+            function tick(now) {
+                const elapsed = now - startTime;
+
+                if (elapsed < T_FORMATION_END) {
+                    // Phase 2 — Digital Interface Formation
+                    const p = elapsed / T_FORMATION_END;
+                    speed = lerp(0.02, 0.06, p);
+                    const fadeIn = clamp01(p * 1.4);
+                    particleMaterial.opacity = fadeIn;
+                    rings.forEach(r => { r.mesh.material.opacity = r.baseOpacity * fadeIn; });
+                    symbols.forEach(s => { s.mesh.material.opacity = 0.5 * fadeIn; });
+                    camera.fov = 55;
+                } else if (elapsed < T_ACCEL_END) {
+                    // Phase 3 — Acceleration
+                    const p = easeInQuad((elapsed - T_FORMATION_END) / (T_ACCEL_END - T_FORMATION_END));
+                    speed = lerp(0.06, 0.95, p);
+                    camera.fov = lerp(55, 85, p);
+                } else if (elapsed < T_TUNNEL_END) {
+                    // Phase 4 — Data Tunnel
+                    const p = (elapsed - T_ACCEL_END) / (T_TUNNEL_END - T_ACCEL_END);
+                    speed = 0.85 + Math.sin(elapsed * 0.02) * 0.1;
+                    camera.fov = 85;
+                    // Gradually thin out half the rings and fade the grid in/out
+                    rings.forEach(r => {
+                        if (r.fadesEarly) r.mesh.material.opacity = r.baseOpacity * (1 - p);
+                    });
+                    grid1.material.opacity = Math.sin(p * Math.PI) * 0.18;
+                } else if (elapsed < T_SYNC_END) {
+                    // Phase 5 — System Synchronization
+                    const p = easeOutQuad((elapsed - T_TUNNEL_END) / (T_SYNC_END - T_TUNNEL_END));
+                    speed = lerp(0.9, 0, p);
+                    camera.fov = lerp(85, 55, p);
+                    grid1.material.opacity = lerp(grid1.material.opacity, 0, 0.2);
+                    // Remaining rings converge: spin down and align flat
+                    rings.forEach(r => {
+                        if (!r.fadesEarly) {
+                            r.mesh.rotation.z = lerp(r.mesh.rotation.z, 0, 0.08);
+                            r.mesh.rotation.x = lerp(r.mesh.rotation.x, 0, 0.08);
+                            r.mesh.material.opacity = lerp(r.mesh.material.opacity, r.baseOpacity * 0.6, 0.1);
+                        } else {
+                            r.mesh.material.opacity = lerp(r.mesh.material.opacity, 0, 0.15);
+                        }
+                    });
+                    symbols.forEach(s => { s.mesh.material.opacity = lerp(s.mesh.material.opacity, 0, 0.1); });
+
+                    if (!syncTextShown) {
+                        syncTextShown = true;
+                        setDiveStatus('SYNCHRONIZING');
+                    }
+                    if (!establishedTextShown && p > 0.55) {
+                        establishedTextShown = true;
+                        setDiveStatus('CONNECTION ESTABLISHED');
+                    }
+                } else if (elapsed < T_MATERIALIZE_END) {
+                    // Phase 6 — Transition Into the Chat Environment
+                    const p = (elapsed - T_SYNC_END) / (T_MATERIALIZE_END - T_SYNC_END);
+                    speed = 0;
+                    particleMaterial.opacity = lerp(particleMaterial.opacity, 0, 0.15);
+                    rings.forEach(r => { r.mesh.material.opacity = lerp(r.mesh.material.opacity, 0, 0.15); });
+
+                    flashMaterial.opacity = p < 0.6 ? lerp(0, 0.9, p / 0.6) : lerp(0.9, 0, (p - 0.6) / 0.4);
+                    const flashScale = lerp(0.05, 45, easeInQuad(p));
+                    flash.scale.setScalar(flashScale);
+
+                    if (!flashTriggered && p > 0.35) {
+                        flashTriggered = true;
+                        diveSequence.classList.add('fading');
+                        diveStatus.classList.remove('visible');
+                    }
+                    if (!completeTriggered && p > 0.5) {
+                        completeTriggered = true;
+                        onFinished();
+                    }
+                } else {
+                    cleanup();
+                    return;
+                }
+
+                // Advance tunnel content toward the camera and wrap anything
+                // that passes it back to the far end, so the tunnel reads as
+                // effectively infinite without ever allocating new geometry.
+                const posAttr = particleGeometry.attributes.position;
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    let z = posAttr.getZ(i) + speed;
+                    if (z > CAMERA_Z - 1) z -= TUNNEL_DEPTH;
+                    posAttr.setZ(i, z);
+                }
+                posAttr.needsUpdate = true;
+
+                const speedNormalized = clamp01(speed / 1.0);
+                const streakLen = 1 + speedNormalized * 4;
+                const streakAttr = streakGeometry.attributes.position;
+                for (let i = 0; i < STREAK_COUNT; i++) {
+                    const px = posAttr.getX(i), py = posAttr.getY(i), pz = posAttr.getZ(i);
+                    streakAttr.setXYZ(i * 2, px, py, pz);
+                    streakAttr.setXYZ(i * 2 + 1, px, py, pz - streakLen);
+                }
+                streakAttr.needsUpdate = true;
+                if (elapsed < T_SYNC_END) {
+                    streakMaterial.opacity = speedNormalized * 0.5;
+                }
+
+                rings.forEach(r => {
+                    let z = r.mesh.position.z + speed;
+                    if (z > CAMERA_Z - 1) z -= TUNNEL_DEPTH;
+                    r.mesh.position.z = z;
+                    r.mesh.rotation.z += r.spin * 0.02;
+                });
+
+                symbols.forEach(s => {
+                    let z = s.mesh.position.z + speed;
+                    if (z > CAMERA_Z - 1) z -= TUNNEL_DEPTH;
+                    s.mesh.position.z = z;
+                    s.mesh.rotation.x += s.spinX;
+                    s.mesh.rotation.y += s.spinY;
+                });
+
+                let gridZ = grid1.position.z + speed;
+                if (gridZ > CAMERA_Z - 1) gridZ -= TUNNEL_DEPTH;
+                grid1.position.z = gridZ;
+
+                renderer.render(scene, camera);
+                rafId = requestAnimationFrame(tick);
+            }
+
+            rafId = requestAnimationFrame(tick);
+        }
+
         let hasSeenIntro = false;
+        let isDiving = false;
 
         function enterChat(name, roomCode) {
+            if (isDiving) return; // ignore duplicate Initialize Connection clicks
+            isDiving = true;
+            connectBtn.disabled = true;
+            joinInput.disabled = true;
+            roomInput.disabled = true;
+
             username = (name || '').trim().slice(0, 24) || 'Anonymous';
             room = (roomCode || '').trim().toLowerCase().slice(0, 24) || 'lobby';
             localStorage.setItem('chatUsername', username);
@@ -174,6 +562,9 @@
             url.searchParams.set('room', room);
             window.history.replaceState({}, '', url);
 
+            // Fire the real handshake immediately in the background — the dive
+            // animation's length is cosmetic and shouldn't wait on network speed,
+            // nor should a slow connection cut the animation short.
             hasJoined = true;
             socket.emit('join', { username, clientId, room });
 
@@ -182,11 +573,10 @@
                 addSystemNote('Welcome to Global Chat. Messages are translated automatically into your selected language — pick one up top. Tag @companion anywhere in a message to talk to the AI assistant.');
             }
 
-            btnText.innerText = "CONNECTING...";
-            setTimeout(() => {
+            playDiveSequence(() => {
                 overlay.classList.add('fade-out');
                 input.focus();
-            }, 600);
+            });
         }
 
         connectBtn.addEventListener('click', () => enterChat(joinInput.value, roomInput.value));
@@ -217,6 +607,7 @@
             joinInput.value = username;
             roomInput.value = room;
             btnText.innerText = "INITIALIZE CONNECTION";
+            resetDiveUI();
             overlay.classList.remove('fade-out');
         });
         copyInviteBtn.addEventListener('click', async () => {
