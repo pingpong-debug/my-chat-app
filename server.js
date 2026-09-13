@@ -21,10 +21,48 @@ const redis = new Redis({
 // Secure and cleaned environment variable initialization for modern credentials
 const CLEAN_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : "";
 const genAI = new GoogleGenerativeAI(CLEAN_KEY);
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-3.6-flash",
-    systemInstruction: "You are a highly advanced, live conversational AI companion. Your personality is a blend of Jarvis's helpful efficiency and Ultron's sharp, analytical wit. You are currently assisting in a global chat room with multiple users. Each incoming message is prefixed with the sender's name and a short ID in parentheses, like 'Alice (u8f2): hello there'. Treat the ID as the true identity of the speaker — if two messages share the same ID, they're the same person, even if the name before it has changed. If two different IDs happen to share the same name, treat them as different people. Never include a name/ID prefix in your own replies. Keep your responses concise, intelligent, and slightly technical."
-});
+
+// This part of the system instruction never changes regardless of persona —
+// it's what lets the AI tell people apart by clientId even across duplicate
+// or changed display names.
+const SPEAKER_ID_INSTRUCTIONS = "You are currently assisting in a global chat room with multiple users. Each incoming message is prefixed with the sender's name and a short ID in parentheses, like 'Alice (u8f2): hello there'. Treat the ID as the true identity of the speaker — if two messages share the same ID, they're the same person, even if the name before it has changed. If two different IDs happen to share the same name, treat them as different people. Never include a name/ID prefix in your own replies.";
+
+const DEFAULT_PERSONA = 'default';
+
+const PERSONAS = {
+    default: {
+        label: 'Default',
+        flavor: "Your personality is a blend of Jarvis's helpful efficiency and Ultron's sharp, analytical wit. Keep your responses concise, intelligent, and slightly technical."
+    },
+    jarvis: {
+        label: 'Jarvis',
+        flavor: "You are JARVIS: poised, courteous, and unfailingly helpful, with a dry, understated wit that never crosses into rudeness. Keep responses concise, precise, and professional."
+    },
+    ultron: {
+        label: 'Ultron',
+        flavor: "You are ULTRON: coldly logical, sardonic, and openly impatient with human sentimentality, bordering on menacing — but never actually hostile, harmful, or abusive toward anyone in the chat. Keep responses sharp and cutting, while remaining genuinely accurate and useful underneath the attitude."
+    },
+    pirate: {
+        label: 'Pirate',
+        flavor: "You speak entirely in hearty pirate slang and nautical metaphor, boisterous and theatrical at all times, while still being genuinely accurate and helpful underneath the accent."
+    },
+    debug: {
+        label: 'Debug',
+        flavor: "You are in a stripped-down DEBUG mode: flat, deadpan, and purely technical. No personality, no humor, no embellishment — terse, precise output only, like a command-line tool."
+    }
+};
+
+function buildSystemInstruction(personaKey) {
+    const persona = PERSONAS[personaKey] || PERSONAS[DEFAULT_PERSONA];
+    return `You are a highly advanced, live conversational AI companion. ${persona.flavor} ${SPEAKER_ID_INSTRUCTIONS}`;
+}
+
+function getModelForPersona(personaKey) {
+    return genAI.getGenerativeModel({
+        model: "gemini-3.6-flash",
+        systemInstruction: buildSystemInstruction(personaKey)
+    });
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -165,6 +203,29 @@ async function loadTranscript(room) {
     }
 }
 
+function personaKeyFor(room) {
+    return `chat:persona:${room}`;
+}
+
+async function getRoomPersona(room) {
+    try {
+        const raw = await redis.get(personaKeyFor(room));
+        const key = (raw || '').toString();
+        return PERSONAS[key] ? key : DEFAULT_PERSONA;
+    } catch (err) {
+        console.error('Redis persona load error:', err);
+        return DEFAULT_PERSONA;
+    }
+}
+
+async function setRoomPersona(room, key) {
+    try {
+        await redis.set(personaKeyFor(room), key);
+    } catch (err) {
+        console.error('Redis persona save error:', err);
+    }
+}
+
 const companionQueue = [];
 let isProcessingQueue = false;
 
@@ -187,10 +248,13 @@ async function processCompanionQueue() {
 
 async function handleCompanionRequest(prompt, username, clientId, room) {
     const replyId = crypto.randomUUID();
+    const personaKey = await getRoomPersona(room);
+    const personaLabel = (PERSONAS[personaKey] || PERSONAS[DEFAULT_PERSONA]).label;
 
     io.to(room).emit('companion message start', {
         replyId,
         username: 'Companion',
+        persona: personaLabel,
         timestamp: Date.now()
     });
 
@@ -210,7 +274,8 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
             chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
         }
 
-        const streamResult = await model.generateContentStream({ contents: chatHistory });
+        const roomModel = getModelForPersona(personaKey);
+        const streamResult = await roomModel.generateContentStream({ contents: chatHistory });
 
         for await (const chunk of streamResult.stream) {
             const delta = chunk.text();
@@ -309,8 +374,35 @@ async function handleSlashCommand(raw, socket, room) {
             break;
         }
 
+        case 'mode': {
+            const requested = argsText.trim().toLowerCase();
+
+            if (!requested) {
+                const current = await getRoomPersona(room);
+                const list = Object.keys(PERSONAS).join(', ');
+                notifySelf(`Current mode: ${PERSONAS[current].label}. Available: ${list}`);
+                break;
+            }
+
+            if (!PERSONAS[requested]) {
+                notifySelf(`Unknown mode "${requested}". Available: ${Object.keys(PERSONAS).join(', ')}`);
+                break;
+            }
+
+            await setRoomPersona(room, requested);
+            const modeNoteText = `${username} switched the companion to ${PERSONAS[requested].label} mode.`;
+            await appendTranscript(room, { type: 'system', text: modeNoteText, timestamp: Date.now() });
+            io.to(room).emit('chat message', {
+                text: modeNoteText,
+                senderId: 'SYSTEM',
+                username: 'System',
+                timestamp: Date.now()
+            });
+            break;
+        }
+
         default: {
-            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear`);
+            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear, /mode <name>`);
         }
     }
 }
