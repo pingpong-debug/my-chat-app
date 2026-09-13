@@ -651,6 +651,23 @@ function closePoll(pollId) {
     enqueueCompanionRequest(prompt, 'System', 'poll-verdict', poll.room);
 }
 
+// --- Click-to-react reactions ---
+// In-memory only, like polls/burns above — reactions don't need to survive
+// a server restart, just the life of the current session.
+const messageReactions = new Map(); // messageId -> Map<emoji, Set<clientId>>
+
+// A fixed palette rather than free-text keeps the payload small and stops
+// anyone from broadcasting arbitrary strings into every client's reaction bar.
+const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀'];
+
+function reactionTally(messageId) {
+    const reactionMap = messageReactions.get(messageId);
+    if (!reactionMap) return [];
+    return [...reactionMap.entries()]
+        .map(([emoji, voters]) => ({ emoji, count: voters.size, voters: [...voters] }))
+        .filter(r => r.count > 0);
+}
+
 // --- Slash commands ---
 
 async function handleSlashCommand(raw, socket, room) {
@@ -880,6 +897,7 @@ io.on('connection', (socket) => {
         }
 
         const payload = {
+            id: crypto.randomUUID(),
             text: msg,
             senderId: socket.id,
             clientId: socket.data.clientId,
@@ -906,6 +924,32 @@ io.on('connection', (socket) => {
     socket.on('poll vote', ({ pollId, optionIndex }) => {
         const room = socket.data.room || DEFAULT_ROOM;
         handlePollVote(pollId, optionIndex, socket.data.clientId, room);
+    });
+
+    socket.on('react', ({ messageId, emoji }) => {
+        const room = socket.data.room || DEFAULT_ROOM;
+        const clientId = socket.data.clientId;
+        if (!messageId || !clientId || !ALLOWED_REACTIONS.includes(emoji)) return;
+
+        let reactionMap = messageReactions.get(messageId);
+        if (!reactionMap) {
+            reactionMap = new Map();
+            messageReactions.set(messageId, reactionMap);
+        }
+        let voters = reactionMap.get(emoji);
+        if (!voters) {
+            voters = new Set();
+            reactionMap.set(emoji, voters);
+        }
+
+        // Toggle: clicking a pill you've already reacted with removes your vote
+        if (voters.has(clientId)) {
+            voters.delete(clientId);
+        } else {
+            voters.add(clientId);
+        }
+
+        io.to(room).emit('reaction update', { messageId, reactions: reactionTally(messageId) });
     });
 
     socket.on('stop typing', () => {
