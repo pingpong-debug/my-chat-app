@@ -272,7 +272,8 @@ body {
 }
 
 #identity-edit,
-#copy-invite {
+#copy-invite,
+#export-chat {
     background: transparent;
     border: 1px solid #444;
     color: #ccc;
