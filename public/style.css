@@ -358,6 +358,60 @@ body {
     background: #171717;
 }
 
+#messages li.poll {
+    border-color: #444;
+}
+
+.poll-question {
+    font-family: 'NDot 45', sans-serif;
+    letter-spacing: 0.5px;
+    margin-bottom: 0.6rem;
+    color: #fff;
+}
+
+.poll-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 0.5rem;
+}
+
+.poll-option {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    color: #e0e0e0;
+    cursor: pointer;
+    font-size: 0.9rem;
+    text-align: left;
+    font-family: inherit;
+}
+
+.poll-option:hover:not(:disabled) {
+    border-color: #cc0000;
+}
+
+.poll-option:disabled {
+    cursor: default;
+    opacity: 0.85;
+}
+
+.poll-option-votes {
+    font-family: 'NDot 45', sans-serif;
+    color: #cc0000;
+    margin-left: 0.75rem;
+}
+
+.poll-status {
+    font-size: 0.75rem;
+    color: #777;
+    letter-spacing: 0.5px;
+}
+
 #messages li.system-note {
     align-self: center;
     background: transparent;
