@@ -41,6 +41,7 @@
             <strong id="identity-room">—</strong>
             <button id="identity-edit" type="button">Change name</button>
             <button id="copy-invite" type="button">Copy invite link</button>
+            <button id="export-chat" type="button">Export chat</button>
         </div>
     </div>
 
@@ -174,6 +175,11 @@
                 copyInviteBtn.textContent = 'Copy failed';
             }
             setTimeout(() => { copyInviteBtn.textContent = originalLabel; }, 1500);
+        });
+
+        const exportChatBtn = document.getElementById('export-chat');
+        exportChatBtn.addEventListener('click', () => {
+            window.open(`/api/export?room=${encodeURIComponent(room)}`, '_blank');
         });
 
         // Automatically fetch all 130+ languages and build the dropdown
