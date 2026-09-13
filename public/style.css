@@ -520,6 +520,114 @@ body {
     color: #ff6666;
 }
 
+.run-btn {
+    display: block;
+    margin: -0.3em 0 0.6em;
+    background: transparent;
+    border: 1px solid #444;
+    color: #ff8888;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 1px;
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.run-btn:hover {
+    border-color: #cc0000;
+    color: #fff;
+}
+
+/* ---------- Code Sandbox Modal ---------- */
+.sandbox-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.75);
+    z-index: 200;
+    justify-content: center;
+    align-items: center;
+}
+
+.sandbox-overlay.visible {
+    display: flex;
+}
+
+.sandbox-modal {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    width: min(90vw, 800px);
+    height: min(80vh, 600px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.sandbox-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid #333;
+}
+
+.sandbox-title {
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    letter-spacing: 3px;
+    font-size: 0.8rem;
+    color: #999;
+}
+
+.sandbox-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.sandbox-reset {
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 6px;
+    padding: 0.3rem 0.6rem;
+    font-family: 'DotGothic16', 'NDot 45', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 1px;
+    cursor: pointer;
+}
+
+.sandbox-reset:hover {
+    border-color: #cc0000;
+    color: #fff;
+}
+
+.sandbox-close {
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 50%;
+    width: 1.8rem;
+    height: 1.8rem;
+    cursor: pointer;
+}
+
+.sandbox-close:hover {
+    border-color: #cc0000;
+    color: #fff;
+}
+
+.sandbox-frame {
+    flex: 1;
+    border: none;
+    background: #fff;
+}
+
 /* ---------- Typing Indicator ---------- */
 #typing-indicator {
     position: fixed;
