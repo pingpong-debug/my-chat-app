@@ -68,6 +68,41 @@ app.get('/api/translate', translateLimiter, async (req, res) => {
     }
 });
 
+app.get('/api/export', async (req, res) => {
+    const room = (req.query.room || '').toString().trim().toLowerCase().slice(0, 24) || 'lobby';
+
+    try {
+        const transcript = await loadTranscript(room);
+
+        const lines = [
+            `# Global Chat — Room "${room}" Transcript`,
+            `_Exported ${new Date().toLocaleString()}_`,
+            ''
+        ];
+
+        if (transcript.length === 0) {
+            lines.push('_No messages recorded yet in this room._');
+        } else {
+            for (const entry of transcript) {
+                const time = new Date(entry.timestamp).toLocaleString();
+                if (entry.type === 'system') {
+                    lines.push(`*[${time}] ${entry.text}*`);
+                } else {
+                    lines.push(`**[${time}] ${entry.username}:** ${entry.text}`);
+                }
+            }
+        }
+
+        const markdown = lines.join('\n');
+        res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${room}-transcript.md"`);
+        res.send(markdown);
+    } catch (err) {
+        console.error('Export error:', err);
+        res.status(500).send('Failed to export transcript.');
+    }
+});
+
 // --- AI Companion: queue + memory ---
 
 const MAX_HISTORY_MESSAGES = 40; // ~20 back-and-forth exchanges
@@ -93,6 +128,40 @@ async function saveChatHistory(room, history) {
         await redis.set(historyKeyFor(room), JSON.stringify(history));
     } catch (err) {
         console.error('Redis save error (this reply will not be remembered):', err);
+    }
+}
+
+// A separate, longer-running log of everything said in a room (not just the
+// @companion exchanges the AI keeps in its own memory) — this is what
+// /export and the "Export chat" button read from.
+const TRANSCRIPT_CAP = 500;
+
+function transcriptKeyFor(room) {
+    return `chat:transcript:${room}`;
+}
+
+async function appendTranscript(room, entry) {
+    try {
+        const raw = await redis.get(transcriptKeyFor(room));
+        let transcript = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+        transcript.push(entry);
+        if (transcript.length > TRANSCRIPT_CAP) {
+            transcript = transcript.slice(-TRANSCRIPT_CAP);
+        }
+        await redis.set(transcriptKeyFor(room), JSON.stringify(transcript));
+    } catch (err) {
+        console.error('Redis transcript append error:', err);
+    }
+}
+
+async function loadTranscript(room) {
+    try {
+        const raw = await redis.get(transcriptKeyFor(room));
+        if (!raw) return [];
+        return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (err) {
+        console.error('Redis transcript load error:', err);
+        return [];
     }
 }
 
@@ -152,6 +221,7 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
 
         chatHistory.push({ role: 'model', parts: [{ text: fullReply }] });
         await saveChatHistory(room, chatHistory);
+        await appendTranscript(room, { type: 'ai', username: 'Companion', text: fullReply, timestamp: Date.now() });
 
         io.to(room).emit('companion message end', {
             replyId,
@@ -203,8 +273,10 @@ async function handleSlashCommand(raw, socket, room) {
     switch (command) {
         case 'clear': {
             await saveChatHistory(room, []);
+            const noteText = `${username} cleared the companion's memory for this room.`;
+            await appendTranscript(room, { type: 'system', text: noteText, timestamp: Date.now() });
             io.to(room).emit('chat message', {
-                text: `${username} cleared the companion's memory for this room.`,
+                text: noteText,
                 senderId: 'SYSTEM',
                 username: 'System',
                 timestamp: Date.now()
@@ -292,6 +364,7 @@ io.on('connection', (socket) => {
             username: 'System',
             timestamp: Date.now()
         });
+        appendTranscript(room, { type: 'system', text: `${socket.data.username} has joined the chat`, timestamp: Date.now() });
     });
 
     socket.on('chat message', (msg) => {
@@ -316,6 +389,7 @@ io.on('connection', (socket) => {
 
         // Broadcast the user's original message, scoped to their room only
         io.to(room).emit('chat message', payload);
+        appendTranscript(room, { type: 'user', username: socket.data.username, text: msg, timestamp: payload.timestamp });
 
         // If the message tags @companion, queue it for the AI to answer
         if (msg.toLowerCase().includes('@companion')) {
@@ -350,6 +424,7 @@ io.on('connection', (socket) => {
                     username: 'System',
                     timestamp: Date.now()
                 });
+                appendTranscript(room, { type: 'system', text: `${name} has left the chat`, timestamp: Date.now() });
             }, RECONNECT_GRACE_MS);
             pendingLeaves.set(leaveKey, timeout);
         }
