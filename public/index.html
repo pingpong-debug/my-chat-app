@@ -69,6 +69,14 @@
             <strong id="identity-name">—</strong>
             <span id="identity-label">Room</span>
             <strong id="identity-room">—</strong>
+            <div id="theme-select-row">
+                <span id="identity-label">Theme</span>
+                <select id="theme-select">
+                    <option value="default">Monochrome</option>
+                    <option value="theme-glyph">Glyph White</option>
+                    <option value="theme-phosphor">Phosphor Green</option>
+                </select>
+            </div>
             <button id="identity-edit" type="button">Change name</button>
             <button id="copy-invite" type="button">Copy invite link</button>
             <button id="export-chat" type="button">Export chat</button>
@@ -86,6 +94,8 @@
 
     <!-- Input Form -->
     <form id="form">
+        <button id="emoji-toggle" type="button" aria-label="Open emoji picker">😊</button>
+        <div id="emoji-drawer"></div>
         <input id="input" autocomplete="off" placeholder="Type a message in any language..." />
         <button type="submit">Send</button>
     </form>
@@ -94,6 +104,19 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
     <script>
+        // --- Theme switcher ---
+        // Applied first, before the rest of the UI sets up, so there's no
+        // flash of the default theme on reload.
+        const THEME_CLASSES = ['theme-glyph', 'theme-phosphor'];
+        function applyTheme(themeValue) {
+            document.body.classList.remove(...THEME_CLASSES);
+            if (themeValue && THEME_CLASSES.includes(themeValue)) {
+                document.body.classList.add(themeValue);
+            }
+        }
+        const savedTheme = localStorage.getItem('chatTheme') || 'default';
+        applyTheme(savedTheme);
+
         const socket = io();
         const form = document.getElementById('form');
         const input = document.getElementById('input');
@@ -212,6 +235,14 @@
             window.open(`/api/export?room=${encodeURIComponent(room)}`, '_blank');
         });
 
+        const themeSelect = document.getElementById('theme-select');
+        themeSelect.value = savedTheme;
+        themeSelect.addEventListener('change', () => {
+            const value = themeSelect.value;
+            applyTheme(value);
+            localStorage.setItem('chatTheme', value);
+        });
+
         // Automatically fetch all 130+ languages and build the dropdown
         fetch('/api/languages')
             .then(res => res.json())
@@ -234,6 +265,45 @@
                 input.value = '';
                 socket.emit('stop typing');
             }
+        });
+
+        // --- Emoji picker (input drawer) ---
+        const emojiToggle = document.getElementById('emoji-toggle');
+        const emojiDrawer = document.getElementById('emoji-drawer');
+        const EMOJI_PICKER_SET = [
+            '😀', '😂', '😊', '😍', '🤔', '😎', '😢', '😡',
+            '👍', '👎', '🙏', '👏', '🔥', '🎉', '💯', '✨',
+            '❤️', '💀', '😱', '🤝', '👀', '🙌', '😴', '🤯'
+        ];
+
+        EMOJI_PICKER_SET.forEach((emoji) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = emoji;
+            btn.addEventListener('click', () => {
+                insertAtCursor(input, emoji);
+                input.focus();
+            });
+            emojiDrawer.appendChild(btn);
+        });
+
+        function insertAtCursor(inputEl, text) {
+            const start = inputEl.selectionStart ?? inputEl.value.length;
+            const end = inputEl.selectionEnd ?? inputEl.value.length;
+            inputEl.value = inputEl.value.slice(0, start) + text + inputEl.value.slice(end);
+            const cursorPos = start + text.length;
+            inputEl.setSelectionRange(cursorPos, cursorPos);
+        }
+
+        emojiToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            emojiDrawer.classList.toggle('open');
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!emojiDrawer.classList.contains('open')) return;
+            if (emojiDrawer.contains(e.target) || e.target === emojiToggle) return;
+            emojiDrawer.classList.remove('open');
         });
 
         // --- Typing indicator (outgoing) ---
@@ -542,6 +612,82 @@
             }
         }
 
+        // --- Click-to-react ---
+        // Must mirror the server's ALLOWED_REACTIONS list — sending anything
+        // outside it is simply ignored server-side.
+        const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀'];
+
+        function attachReactionUI(item, messageId) {
+            if (!messageId) return;
+            item.dataset.messageId = messageId;
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'react-toggle';
+            toggle.textContent = '☺+';
+            toggle.setAttribute('aria-label', 'Add reaction');
+
+            const popover = document.createElement('div');
+            popover.className = 'react-popover';
+            QUICK_REACTIONS.forEach((emoji) => {
+                const emojiBtn = document.createElement('button');
+                emojiBtn.type = 'button';
+                emojiBtn.textContent = emoji;
+                emojiBtn.addEventListener('click', () => {
+                    socket.emit('react', { messageId, emoji, room });
+                    popover.classList.remove('open');
+                    toggle.classList.remove('open');
+                });
+                popover.appendChild(emojiBtn);
+            });
+
+            toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isOpen = popover.classList.toggle('open');
+                toggle.classList.toggle('open', isOpen);
+            });
+
+            const reactionsEl = document.createElement('div');
+            reactionsEl.className = 'reactions';
+
+            item.appendChild(toggle);
+            item.appendChild(popover);
+            item.appendChild(reactionsEl);
+        }
+
+        // Close any open reaction popover when clicking elsewhere on the page
+        document.addEventListener('click', (e) => {
+            document.querySelectorAll('.react-popover.open').forEach((pop) => {
+                if (pop.contains(e.target)) return;
+                pop.classList.remove('open');
+                const toggle = pop.previousElementSibling;
+                if (toggle && toggle.classList.contains('react-toggle')) toggle.classList.remove('open');
+            });
+        });
+
+        function renderReactions(messageId, reactions) {
+            const item = messages.querySelector(`li[data-message-id="${CSS.escape(messageId)}"]`);
+            if (!item) return;
+            const container = item.querySelector('.reactions');
+            if (!container) return;
+
+            container.innerHTML = '';
+            reactions.forEach(({ emoji, count, voters }) => {
+                const pill = document.createElement('button');
+                pill.type = 'button';
+                pill.className = 'reaction-pill' + ((voters || []).includes(clientId) ? ' mine' : '');
+                pill.innerHTML = `<span>${emoji}</span><span class="count">${count}</span>`;
+                pill.addEventListener('click', () => {
+                    socket.emit('react', { messageId, emoji, room });
+                });
+                container.appendChild(pill);
+            });
+        }
+
+        socket.on('reaction update', (data) => {
+            renderReactions(data.messageId, data.reactions);
+        });
+
         // --- Streaming companion replies ---
         const streamingMessages = new Map(); // replyId -> { bodyEl, rawText }
 
@@ -553,6 +699,7 @@
                 <div class="persona-tag">${escapeHtml(data.persona || 'Default')} MODE</div>
                 <div class="body"></div>
             `;
+            attachReactionUI(item, data.replyId);
             messages.appendChild(item);
             window.scrollTo(0, document.body.scrollHeight);
 
@@ -634,6 +781,7 @@
                     <div class="meta"><span class="name">${escapeHtml(data.username || 'You')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
                     <div class="body">${escapeHtml(data.text)}</div>
                 `;
+                attachReactionUI(item, data.id);
                 messages.appendChild(item);
                 window.scrollTo(0, document.body.scrollHeight);
                 return;
@@ -643,6 +791,7 @@
                 <div class="meta"><span class="name">${escapeHtml(data.username || 'Stranger')}</span><span class="time">${formatTime(data.timestamp)}</span></div>
                 <div class="body"><strong>Original:</strong> ${escapeHtml(data.text)}<br><em>Translating...</em></div>
             `;
+            attachReactionUI(item, data.id);
             messages.appendChild(item);
             window.scrollTo(0, document.body.scrollHeight);
 
