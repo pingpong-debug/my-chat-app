@@ -22,6 +22,213 @@ const redis = new Redis({
 const CLEAN_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : "";
 const genAI = new GoogleGenerativeAI(CLEAN_KEY);
 
+// --- Multi-provider AI fallback chain ---
+// Order: Gemini -> Groq -> OpenRouter -> Cohere -> Hugging Face.
+// Each provider is tried in turn; a quota/rate-limit error from one marks it
+// exhausted in Redis for ~24h and the chain silently moves to the next —
+// no room announcement, no failed reply, until every provider is exhausted.
+
+const Groq = require('groq-sdk');
+const groq = new Groq({ apiKey: (process.env.GROQ_API_KEY || '').trim() });
+// llama-3.3-70b-versatile was deprecated by Groq on Aug 16, 2026 — using its
+// replacement instead. openai/gpt-oss-20b is the lighter/faster alternative
+// if you'd rather trade some quality for speed.
+const GROQ_MODEL = 'openai/gpt-oss-120b';
+
+const { CohereClient } = require('cohere-ai');
+const cohere = new CohereClient({ token: (process.env.COHERE_API_KEY || '').trim() });
+const COHERE_MODEL = 'command-r-08-2024';
+
+const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || '').trim();
+// OpenRouter's own router model — it auto-selects whatever free model is
+// currently available on their end, so this ID never goes stale the way a
+// specific hardcoded free model name eventually would.
+const OPENROUTER_MODEL = 'openrouter/free';
+
+const HF_API_KEY = (process.env.HF_API_KEY || '').trim();
+// Served through Hugging Face's OpenAI-compatible Inference Providers router.
+const HF_MODEL = 'meta-llama/Llama-3.2-3B-Instruct';
+
+// A flat 24h cooldown per provider rather than trying to match each one's
+// exact reset clock — simple, and close enough that a provider gets retried
+// again "the next day".
+const EXHAUST_TTL_SECONDS = 24 * 60 * 60;
+
+function exhaustedKeyFor(providerKey) {
+    return `ai:${providerKey}:exhausted`;
+}
+
+async function isProviderExhausted(providerKey) {
+    try {
+        const flag = await redis.get(exhaustedKeyFor(providerKey));
+        return !!flag;
+    } catch (err) {
+        console.error(`Redis error checking ${providerKey} exhaustion (assuming not exhausted):`, err);
+        return false;
+    }
+}
+
+async function markProviderExhausted(providerKey) {
+    try {
+        await redis.set(exhaustedKeyFor(providerKey), '1', { ex: EXHAUST_TTL_SECONDS });
+    } catch (err) {
+        console.error(`Redis error marking ${providerKey} exhausted:`, err);
+    }
+}
+
+// Gemini's history format is { role, parts: [{ text }] }; every other
+// provider here speaks the OpenAI-style { role, content } shape, with
+// 'model' renamed to 'assistant'.
+function toOpenAiMessages(systemInstruction, chatHistory) {
+    return [
+        { role: 'system', content: systemInstruction },
+        ...chatHistory.map(entry => ({
+            role: entry.role === 'model' ? 'assistant' : 'user',
+            content: entry.parts?.[0]?.text || ''
+        }))
+    ];
+}
+
+// Shared SSE line-parser for any OpenAI-compatible streaming endpoint
+// (OpenRouter and the Hugging Face router both speak this format).
+async function* readOpenAiSse(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep the last, possibly-incomplete line for next read
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === '[DONE]') return;
+            try {
+                const json = JSON.parse(payload);
+                const delta = json.choices?.[0]?.delta?.content;
+                if (delta) yield delta;
+            } catch (err) {
+                // Ignore malformed/partial SSE lines — they complete on the next chunk
+            }
+        }
+    }
+}
+
+async function* streamGeminiReply(chatHistory, personaKey) {
+    const roomModel = getModelForPersona(personaKey);
+    const streamResult = await roomModel.generateContentStream({ contents: chatHistory });
+    for await (const chunk of streamResult.stream) {
+        const delta = chunk.text();
+        if (delta) yield delta;
+    }
+}
+
+async function* streamGroqReply(chatHistory, personaKey) {
+    const systemInstruction = buildSystemInstruction(personaKey);
+    const stream = await groq.chat.completions.create({
+        model: GROQ_MODEL,
+        messages: toOpenAiMessages(systemInstruction, chatHistory),
+        stream: true
+    });
+    for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta?.content || '';
+        if (delta) yield delta;
+    }
+}
+
+async function* streamOpenRouterReply(chatHistory, personaKey) {
+    const systemInstruction = buildSystemInstruction(personaKey);
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: OPENROUTER_MODEL,
+            messages: toOpenAiMessages(systemInstruction, chatHistory),
+            stream: true
+        })
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        const err = new Error(`OpenRouter error ${response.status}: ${errText}`);
+        err.status = response.status;
+        throw err;
+    }
+
+    yield* readOpenAiSse(response);
+}
+
+async function* streamHuggingFaceReply(chatHistory, personaKey) {
+    const systemInstruction = buildSystemInstruction(personaKey);
+    const response = await fetch('https://router.huggingface.co/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${HF_API_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: HF_MODEL,
+            messages: toOpenAiMessages(systemInstruction, chatHistory),
+            stream: true
+        })
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        const err = new Error(`Hugging Face error ${response.status}: ${errText}`);
+        err.status = response.status;
+        throw err;
+    }
+
+    yield* readOpenAiSse(response);
+}
+
+async function* streamCohereReply(chatHistory, personaKey) {
+    const systemInstruction = buildSystemInstruction(personaKey);
+
+    // Cohere's v1 chat API takes the latest message separately from history;
+    // history entries are { role: 'USER'|'CHATBOT', message }.
+    const historyCopy = [...chatHistory];
+    const last = historyCopy.pop();
+    const latestMessage = last?.parts?.[0]?.text || '';
+    const cohereHistory = historyCopy.map(entry => ({
+        role: entry.role === 'model' ? 'CHATBOT' : 'USER',
+        message: entry.parts?.[0]?.text || ''
+    }));
+
+    const stream = await cohere.chatStream({
+        model: COHERE_MODEL,
+        message: latestMessage,
+        chatHistory: cohereHistory,
+        preamble: systemInstruction
+    });
+
+    for await (const event of stream) {
+        if (event.eventType === 'text-generation' && event.text) {
+            yield event.text;
+        }
+    }
+}
+
+// Tried in this order for every companion request; skips any provider
+// already marked exhausted for the day.
+const PROVIDER_CHAIN = [
+    { key: 'gemini', stream: streamGeminiReply },
+    { key: 'groq', stream: streamGroqReply },
+    { key: 'openrouter', stream: streamOpenRouterReply },
+    { key: 'cohere', stream: streamCohereReply },
+    { key: 'huggingface', stream: streamHuggingFaceReply }
+];
+
 // This part of the system instruction never changes regardless of persona —
 // it's what lets the AI tell people apart by clientId even across duplicate
 // or changed display names.
@@ -274,14 +481,35 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
             chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
         }
 
-        const roomModel = getModelForPersona(personaKey);
-        const streamResult = await roomModel.generateContentStream({ contents: chatHistory });
+        let succeeded = false;
 
-        for await (const chunk of streamResult.stream) {
-            const delta = chunk.text();
-            if (!delta) continue;
-            fullReply += delta;
-            io.to(room).emit('companion message chunk', { replyId, delta });
+        for (const provider of PROVIDER_CHAIN) {
+            const exhausted = await isProviderExhausted(provider.key);
+            if (exhausted) continue;
+
+            try {
+                fullReply = '';
+                for await (const delta of provider.stream(chatHistory, personaKey)) {
+                    fullReply += delta;
+                    io.to(room).emit('companion message chunk', { replyId, delta });
+                }
+                succeeded = true;
+                break;
+            } catch (err) {
+                const isQuotaError = err?.status === 429 || /quota|rate.?limit/i.test(err?.message || '');
+                if (!isQuotaError) throw err; // a real bug/config error should surface, not silently cascade
+
+                console.warn(`${provider.key} quota/rate-limited — marking exhausted, trying the next provider.`);
+                await markProviderExhausted(provider.key);
+                fullReply = '';
+                // loop continues to the next provider in the chain
+            }
+        }
+
+        if (!succeeded) {
+            const err = new Error('All configured AI providers are currently exhausted or rate-limited.');
+            err.status = 429;
+            throw err;
         }
 
         chatHistory.push({ role: 'model', parts: [{ text: fullReply }] });
@@ -300,7 +528,7 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
             || /quota/i.test(error?.message || '');
 
         const failureText = isQuotaError
-            ? "Daily thinking quota exhausted. Recalibrating — available again once the free tier resets tomorrow."
+            ? "Daily thinking quota exhausted on every configured provider. Recalibrating — try again shortly."
             : "Connection severed. Awaiting recalibration.";
 
         // If nothing streamed yet, the bubble is still empty — send the
