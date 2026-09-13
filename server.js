@@ -314,6 +314,67 @@ async function handleCompanionRequest(prompt, username, clientId, room) {
     }
 }
 
+// --- Self-destruct rooms (/burn) ---
+
+const pendingBurns = new Map(); // room -> { timeout, fireAt }
+
+function formatBurnDuration(ms) {
+    if (ms % 3600000 === 0) return `${ms / 3600000}h`;
+    if (ms % 60000 === 0) return `${ms / 60000}m`;
+    return `${Math.round(ms / 1000)}s`;
+}
+
+function cancelPendingBurn(room) {
+    const pending = pendingBurns.get(room);
+    if (!pending) return false;
+    clearTimeout(pending.timeout);
+    pendingBurns.delete(room);
+    io.to(room).emit('burn cancelled');
+    return true;
+}
+
+function scheduleBurn(room, ms, initiator) {
+    const existing = pendingBurns.get(room);
+    if (existing) clearTimeout(existing.timeout);
+
+    const fireAt = Date.now() + ms;
+    const timeout = setTimeout(() => executeBurn(room), ms);
+    pendingBurns.set(room, { timeout, fireAt });
+
+    const noteText = `${initiator} initiated a self-destruct sequence. This room will be wiped in ${formatBurnDuration(ms)}. Use /burn cancel to abort.`;
+    appendTranscript(room, { type: 'system', text: noteText, timestamp: Date.now() });
+    io.to(room).emit('chat message', {
+        text: noteText,
+        senderId: 'SYSTEM',
+        username: 'System',
+        timestamp: Date.now()
+    });
+    io.to(room).emit('burn scheduled', { fireAt });
+}
+
+async function executeBurn(room) {
+    pendingBurns.delete(room);
+
+    try {
+        await redis.del(historyKeyFor(room));
+        await redis.del(transcriptKeyFor(room));
+        await redis.del(personaKeyFor(room));
+    } catch (err) {
+        console.error('Redis burn error:', err);
+    }
+
+    io.to(room).emit('room burned');
+
+    // Give clients a moment to render the takeover screen before their
+    // connection actually closes.
+    setTimeout(async () => {
+        const socketsInRoom = await io.in(room).fetchSockets();
+        for (const s of socketsInRoom) {
+            s.disconnect(true);
+        }
+    }, 2000);
+}
+
 // --- Slash commands ---
 
 async function handleSlashCommand(raw, socket, room) {
@@ -401,8 +462,48 @@ async function handleSlashCommand(raw, socket, room) {
             break;
         }
 
+        case 'burn': {
+            const arg = argsText.trim().toLowerCase();
+
+            if (arg === 'cancel') {
+                const cancelled = cancelPendingBurn(room);
+                notifySelf(cancelled ? 'Self-destruct sequence aborted.' : 'No self-destruct sequence is currently active.');
+                break;
+            }
+
+            if (arg === 'now') {
+                io.to(room).emit('chat message', {
+                    text: `${username} triggered an immediate self-destruct. Purging room...`,
+                    senderId: 'SYSTEM',
+                    username: 'System',
+                    timestamp: Date.now()
+                });
+                setTimeout(() => executeBurn(room), 1500);
+                break;
+            }
+
+            const match = arg.match(/^(\d+)(s|m|h)$/);
+            if (!match) {
+                notifySelf('Usage: /burn now, /burn 15m (or 30s / 2h), or /burn cancel');
+                break;
+            }
+
+            const amount = parseInt(match[1], 10);
+            const unit = match[2];
+            const multiplier = unit === 's' ? 1000 : unit === 'm' ? 60000 : 3600000;
+            const ms = amount * multiplier;
+
+            if (ms <= 0 || ms > 24 * 3600000) {
+                notifySelf('Please choose a duration between 1 second and 24 hours.');
+                break;
+            }
+
+            scheduleBurn(room, ms, username);
+            break;
+        }
+
         default: {
-            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear, /mode <name>`);
+            notifySelf(`Unknown command: /${command}. Available: /summarize, /roast @username, /clear, /mode <name>, /burn <now|duration|cancel>`);
         }
     }
 }
